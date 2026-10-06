@@ -4,7 +4,10 @@ namespace RTP_Calculator.Util;
 
 public sealed class Options
 {
-    public uint Lines { get; private set; } = 50;
+    /// <summary>Lines bet. 0 until set: then the number of paylines in the starting (base) layout is used.</summary>
+    public uint Lines { get; private set; }
+    public bool LinesSpecified => Lines > 0;
+    public void UseDefaultLines(uint lines) { if (Lines == 0) Lines = lines; }
     public uint Bet { get; private set; } = 1;
     public int Threads { get; private set; } = Environment.ProcessorCount;
     public long? Spins { get; private set; }

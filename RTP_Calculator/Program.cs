@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using RTP_Calculator.Analysis;
+using RTP_Calculator.Analysis.Exact;
 using RTP_Calculator.Util;
 
 namespace RTP_Calculator
@@ -14,6 +15,9 @@ Usage:
   RTP_Calculator <command> <game.dat | game.agm> [options]
 
 Commands:
+  analytic     Base-game RTP from the reel design (seconds): line pays via the engine's matcher,
+               scatter trigger / prizes via a few exact engine evaluations, then verification of
+               the model against the full engine on random reel stops (--samples, default 200).
   exact-base   Exact base-game RTP: line wins, non-line wins (scatter / trigger prizes) and
                feature trigger probability. Uses the real engine as the pay evaluator.
   simulate     Emulator-style Monte Carlo, reported per layout, with standard error.
@@ -22,7 +26,7 @@ Commands:
   all          selftest, profile, exact-base, then simulate.
 
 Options:
-  --lines N          Lines bet (default 50)
+  --lines N          Lines bet (default: all paylines defined in the base layout)
   --bet N            Credits bet per line (default 1)
   --threads N        Worker threads (default: all cores)
   --spins N          Paid games for simulate (default 2,000,000) / profile (default 20,000)
@@ -50,12 +54,17 @@ A .agm input is compiled to a temporary .dat with the AGT compiler; the .agm is 
                 var options = Options.Parse(args.Skip(2));
                 string command = args[0].ToLowerInvariant();
                 byte[] dat = LoadDat(args[1]);
+                uint available = BaseLayoutPaylines(dat);
+                if (!options.LinesSpecified) options.UseDefaultLines(Math.Max(1, available));
+                else if (available > 0 && options.Lines > available)
+                    throw new ArgumentException($"--lines {options.Lines} is more than the {available} paylines defined in the base layout.");
                 Console.WriteLine($"Game file : {Path.GetFileName(args[1])}");
                 Console.WriteLine($"Bet       : {options.Bet} x {options.Lines} lines, threads {options.Threads}");
                 Console.WriteLine();
                 switch (command)
                 {
                     case "exact-base": RunExact(dat, options); break;
+                    case "analytic": return RunAnalytic(dat, options) ? 0 : 3;
                     case "simulate": RunSimulate(dat, options); break;
                     case "profile": RunProfile(dat, options); break;
                     case "selftest": return RunSelfTest(dat, options) ? 0 : 3;
@@ -75,6 +84,14 @@ A .agm input is compiled to a temporary .dat with the AGT compiler; the .agm is 
                 if (e.InnerException is not null) Console.Error.WriteLine("  " + e.InnerException.Message);
                 return 2;
             }
+        }
+
+        /// <summary>Number of paylines defined in the layout the game starts in (0 for pattern / ways games).</summary>
+        private static uint BaseLayoutPaylines(byte[] dat)
+        {
+            var random = new AgtEngine.Core.Random.AGTRand(new Engine.ScriptedRandomAgent(1));
+            var game = new AgtEngine.Core.Game.AGTGameLoader(random, new AgtEngine.Core.Misc.VariableListContext()).CreateGameInstance(dat);
+            return (uint)game.CurrentLayout.PayLines.Count;
         }
 
         private static byte[] LoadDat(string path)
@@ -130,6 +147,42 @@ A .agm input is compiled to a temporary .dat with the AGT compiler; the .agm is 
 
         private static string Compare(double value, double? reference) =>
             reference is double x ? $"   reference {x:F12}  diff {value - x:+0.0e+00;-0.0e+00;0}" : "";
+
+        private static bool RunAnalytic(byte[] dat, Options o)
+        {
+            Console.WriteLine("=== Analytic base game (reel design) ===");
+            var sw = Stopwatch.StartNew();
+            var r = new Analysis.Analytic.AnalyticBaseGame(dat, o.Bet, o.Lines) { VerifySamples = o.Samples }.Run(verify: o.Samples > 0);
+            Console.WriteLine($"  Mystery construct    : {r.Mystery}");
+            Console.WriteLine($"  Lines                : {r.BetLines} bet lines, {r.LinePayConditions} line pay conditions, {r.DistinctLineModels} distinct line models");
+            Console.WriteLine($"                         {r.TuplesVisited:N0} symbol tuples, {r.PayEvaluations:N0} engine pay evaluations, {r.LineTime.TotalSeconds:F2} s");
+            Console.WriteLine($"  Scatter oracle       : {r.OracleConfigurations} configurations, {r.OracleActs:N0} engine acts, {r.ScatterTime.TotalSeconds:F2} s");
+            Console.Write("  Scatter count dist.  :");
+            for (int k = 0; k < r.CountDistribution.Length; k++) if (r.CountDistribution[k] > 0) Console.Write($" {k}:{r.CountDistribution[k]:G6}");
+            Console.WriteLine();
+            Console.WriteLine($"  Trigger T(k)         : {string.Join(" ", r.T.Select((t, k) => $"{k}:{t:0.##}"))}");
+            foreach (var g in r.Prizes.GroupBy(p => p.Key.reel).OrderBy(g => g.Key))
+                Console.WriteLine($"  Prize per scatter    : {r.ReelNames[g.Key]}: " + string.Join("  ", g.OrderBy(p => p.Key.window).Select(p => $"row {p.Key.window} = {p.Value:G8}")));
+            foreach (var n in r.Notes) Console.WriteLine("  note: " + n);
+            Console.WriteLine();
+            Console.WriteLine($"  Base line RTP        : {r.LineRtp:F12}{Compare(r.LineRtp, o.RefLines)}");
+            Console.WriteLine($"  Base non-line RTP    : {r.NonLineRtp:F12}{Compare(r.NonLineRtp, o.RefNonLine)}");
+            Console.WriteLine($"  Base RTP (total)     : {r.LineRtp + r.NonLineRtp:F12}");
+            Console.WriteLine($"  Feature trigger      : p = {r.TriggerProbability:F12}  =  1 in {1 / r.TriggerProbability:F6}{Compare(1 / r.TriggerProbability, o.RefHit)}");
+            bool ok = true;
+            if (r.VerifiedLines > 0)
+            {
+                ok = r.LineMismatches == 0 && r.ScatterMismatches == 0;
+                Console.WriteLine();
+                Console.WriteLine($"  Verification vs full engine ({r.VerifyTime.TotalSeconds:F1} s): " +
+                                  $"lines {r.VerifiedLines - r.LineMismatches}/{r.VerifiedLines} agree, scatter/trigger {r.VerifiedScatter - r.ScatterMismatches}/{r.VerifiedScatter} agree " +
+                                  (ok ? "- PASS" : "- FAIL"));
+                foreach (var m in r.MismatchExamples) Console.WriteLine("    " + m);
+            }
+            Console.WriteLine($"  Elapsed              : {sw.Elapsed.TotalSeconds:F1} s");
+            Console.WriteLine();
+            return ok;
+        }
 
         private static void RunSimulate(byte[] dat, Options o)
         {

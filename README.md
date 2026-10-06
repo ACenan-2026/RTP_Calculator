@@ -21,7 +21,33 @@ Three independent checks agree with these figures:
 
 The feature (LBF) is not computed exactly yet; see "What this proof of concept shows".
 
-## How it works
+## Analytic mode (`analytic`): reel design instead of reel stops
+
+This mode computes the same base-game figures in about **12 seconds**. The engine-driven `exact-base` takes about 100 CPU-minutes. Instead of playing reel stops, it works from the reel design: the per-reel symbol and scatter distributions. The engine still decides the game rules:
+
+| Construct | Evaluator | Engine's role |
+|---|---|---|
+| Mystery `Replace ... CoordinateBased ... ReplaceInReel` | `MysteryModel`: one shared draw, so the tool computes each outcome (11 here) and mixes them | Supplies the selector reel distribution |
+| Line pays (`Win`) | `LineEvaluator`: per-reel cell distributions, then sum over symbol tuples of product(p) × pay | The engine's matcher (`ContainsSymbolSet`) decides each tuple's pay, with the highest win per line |
+| Scatter trigger, scatter pays, per-scatter prizes | `ScatterEvaluator`: convolution of per-reel scatter-count distributions | A few exact engine evaluations give T(k), S(k) and the expected prize per scatter cell, so the Sc → ScSpl → prize chain is not re-implemented |
+
+Laughing Dragon results:
+
+| Quantity | Value | Difference from Excel |
+|---|---|---|
+| Line RTP | 0.375124860821 | 5e-15 |
+| Non-line RTP | 0.100035097492 | 2e-16 |
+| Hit rate | 1 in 90.117780 | 7e-12 |
+
+The work was 2.5M symbol tuples, 249k engine pay evaluations, and 40 scatter configurations (35k engine spins). Verification against the full engine on 200 random reel-stop sets agreed on every line pay, scatter win and trigger.
+
+Whenever a model assumption is not met, the analytic mode stops with "not supported" rather than guessing. Examples: a replacement that touches line symbols, a trigger that depends on where scatters land, or prizes that depend on the scatter count. The slower `exact-base` still works in those cases.
+
+```
+RTP_Calculator analytic "...\LaughingDragon.dat" --lines 50 --samples 200 --ref-lines 0.37512486082128127 --ref-nonline 0.1000350974915225 --ref-hit 90.11777957344
+```
+
+## How it works (engine-driven exact mode)
 
 1. **Hook the RNG.** Every random number the engine uses goes through `IRandomNumberAgent`. `ScriptedRandomAgent` replaces it: it replays a set sequence of values and records the range of every draw.
 2. **Enumerate one spin exactly** (`ActEnumerator`). The tool replays a spin from a snapshot, branch by branch, depth-first, until it has covered every in-spin draw (replacements, weighted picks and so on). Weighted tables are collapsed into cells (`DrawPartition`). For example, a draw from range 100 with weights 60/25/10/4/1 becomes 5 branches, not 100, and a 10,000,000-weight table becomes a handful.
@@ -52,10 +78,10 @@ All checks pass for Laughing Dragon. If any check fails for another game, don't 
 - The project expects `WinEngineGameCompiler_DOTNET` to sit next to `RTP_Calculator`. If it doesn't, pass `/p:WinEngineRepo=<path>\`.
 
 ```
-RTP_Calculator selftest   "...\LaughingDragon.dat"
-RTP_Calculator profile    "...\LaughingDragon.dat"
-RTP_Calculator exact-base "...\LaughingDragon.dat" --ref-lines 0.37512486082128127 --ref-nonline 0.1000350974915225 --ref-hit 90.11777957344
-RTP_Calculator simulate   "...\LaughingDragon.dat" --spins 5000000
+RTP_Calculator selftest   "...\LaughingDragon.dat" --lines 50
+RTP_Calculator profile    "...\LaughingDragon.dat" --lines 50
+RTP_Calculator exact-base "...\LaughingDragon.dat" --lines 50 --ref-lines 0.37512486082128127 --ref-nonline 0.1000350974915225 --ref-hit 90.11777957344
+RTP_Calculator simulate   "...\LaughingDragon.dat" --lines 50 --spins 5000000
 ```
 
 - An `.agm` file can be passed instead of a `.dat`. The tool compiles it to a temporary `.dat` with `AgtCompiler.Core`.
@@ -95,6 +121,7 @@ That leads to four conclusions:
 | `Enumeration/ActEnumerator.cs` | Exact depth-first enumeration of one spin |
 | `Enumeration/GroupedProductEnumerator.cs` | Parallel enumeration over grouped reel stops, plus sharding |
 | `Analysis/BaseSetup.cs`, `ReelModel.cs` | Reel/line/scatter model read from the engine; stop grouping |
-| `Analysis/BaseGameExact.cs` | The base-game split |
-| `Analysis/SelfTest.cs` | Assumption checks A–G |
+| `Analysis/Exact/BaseGameExact.cs` | The base-game split (engine-driven exact mode) |
+| `Analysis/Exact/SelfTest.cs` | Assumption checks A–G for exact mode |
 | `Analysis/MonteCarlo.cs`, `DrawProfiler.cs` | Simulation cross-check and feasibility profile |
+| `Analysis/Analytic/*.cs` | Analytic (reel-design) evaluators and their verification |

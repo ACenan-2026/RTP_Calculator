@@ -1,7 +1,7 @@
 using RTP_Calculator.Engine;
 using RTP_Calculator.Enumeration;
 
-namespace RTP_Calculator.Analysis;
+namespace RTP_Calculator.Analysis.Exact;
 
 /// <summary>
 /// Exact base-game RTP using the real engine as the pay evaluator.

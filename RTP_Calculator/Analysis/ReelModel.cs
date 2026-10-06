@@ -34,15 +34,22 @@ public sealed class ReelModel
                 Hidden = reel.Hidden,
                 Weighted = reel.Symbols.ExtendedSymbolsPresent,
                 Coordinates = Enumerable.Range(0, windows).Select(w => reel.Graph.Coordinate((uint)w)).ToArray(),
-                Windows = new string[range][]
+                Windows = new string[range][],
+                WindowSymbols = new AgtEngine.Core.Graphic.AGTSymbol[range][]
             };
             for (uint p = 0; p < range; p++)
             {
                 uint position = reel.Symbols.ActualSymbolIndexInExtendedSet(p);
                 var cells = new string[windows];
+                var symbols = new AgtEngine.Core.Graphic.AGTSymbol[windows];
                 for (int w = 0; w < windows; w++)
-                    cells[w] = reel.Symbols[unchecked(position + (uint)w) % stripLength].Name.CString;
+                {
+                    // Copies, so later engine activity cannot change the model.
+                    symbols[w] = new AgtEngine.Core.Graphic.AGTSymbol(reel.Symbols[unchecked(position + (uint)w) % stripLength]);
+                    cells[w] = symbols[w].Name.CString;
+                }
                 info.Windows[p] = cells;
+                info.WindowSymbols[p] = symbols;
             }
             model.Reels.Add(info);
         }
@@ -73,6 +80,8 @@ public sealed class ReelInfo
     public AGTCoordinate[] Coordinates { get; set; } = Array.Empty<AGTCoordinate>();
     /// <summary>Windows[stop][windowIndex] = symbol name shown before any replacement.</summary>
     public string[][] Windows { get; set; } = Array.Empty<string[]>();
+    /// <summary>WindowSymbols[stop][windowIndex] = the engine's symbol object (with qualifiers such as wild).</summary>
+    public AgtEngine.Core.Graphic.AGTSymbol[][] WindowSymbols { get; set; } = Array.Empty<AgtEngine.Core.Graphic.AGTSymbol[]>();
 }
 
 /// <summary>A set of reel stops that are equivalent for the quantity being computed.</summary>

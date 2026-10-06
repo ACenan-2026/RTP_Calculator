@@ -1,7 +1,7 @@
 using RTP_Calculator.Engine;
 using RTP_Calculator.Enumeration;
 
-namespace RTP_Calculator.Analysis;
+namespace RTP_Calculator.Analysis.Exact;
 
 /// <summary>
 /// Empirical checks of every assumption the exact base-game calculation relies on.
