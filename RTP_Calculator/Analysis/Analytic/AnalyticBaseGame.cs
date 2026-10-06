@@ -29,11 +29,21 @@ public sealed class AnalyticBaseGame
     public AnalyticBaseGame(byte[] dat, uint betPerLine, uint lines) { this.dat = dat; this.betPerLine = betPerLine; this.lines = lines; }
 
     public int VerifySamples { get; set; } = 300;
+    /// <summary>Seed for choosing verification screens (vary it to check different screens in separate runs).</summary>
+    public int VerifySeed { get; set; } = 4242;
     /// <summary>Maximum internal branches per spin for the engine oracle / verification.</summary>
     public long OraclePathLimit { get; set; } = 5_000_000;
     /// <summary>Maximum engine configurations for the general non-line evaluator (per scenario).</summary>
     public long ConfigurationLimit { get; set; } = 20_000;
     public int ScenarioLimit { get; set; } = 64;
+    /// <summary>Compute line wins only (the non-line part is reported as skipped).</summary>
+    public bool SkipNonLine { get; set; }
+    /// <summary>Print progress of each stage.</summary>
+    public bool Verbose { get; set; }
+    private readonly Stopwatch clock = Stopwatch.StartNew();
+    private void Log(string message) { if (Verbose) Console.WriteLine($"    [{clock.Elapsed:mm\\:ss}] {message}"); }
+    /// <summary>Random in-spin draws per check when exact enumeration of a spin is too large.</summary>
+    public int SampledDraws { get; set; } = 2000;
 
     public sealed class Report
     {
@@ -50,6 +60,11 @@ public sealed class AnalyticBaseGame
         public double ExpectedNonLineWin { get; set; }
         public double TriggerProbability { get; set; }
         public string NonLineMethod { get; set; } = "";
+        public string Floating { get; set; } = "none";
+        /// <summary>Set when the non-line part could not be computed; line results are still exact.</summary>
+        public string? NonLineError { get; set; }
+        public bool LinesOnly => NonLineError is not null;
+        public int SampledChecks { get; set; }
         public double[] T { get; set; } = Array.Empty<double>();
         public double[] CountDistribution { get; set; } = Array.Empty<double>();
         public Dictionary<(int reel, int window), double> Prizes { get; set; } = new Dictionary<(int, int), double>();
@@ -78,6 +93,8 @@ public sealed class AnalyticBaseGame
         public ReplacementCatalog Catalog = null!;
         public ScatterEvaluator? Count;
         public SpecialSymbolEvaluator? General;
+        public FloatingModel Floating = null!;
+        public string? NonLineError;
         public double LineWin, NonLineWin, Trigger;
         public (double win, double trigger) Predict(uint[] stops) => Count is not null ? Count.Predict(stops) : General!.Predict(stops);
     }
@@ -117,29 +134,69 @@ public sealed class AnalyticBaseGame
             sc.Catalog = ReplacementCatalog.Build(layout, model, scan, lineCells, lineEval, setup.ScatterSymbols);
             sc.Mystery = MysteryModel.Build(layout, model, sc.Catalog);
             report.Mystery = sc.Mystery.Description;
-            var blocking = sc.Catalog.Entries.Where(e => e.ActsOnLines && !sc.Mystery.Handled.Contains(e)).ToList();
+            sc.Floating = FloatingModel.Build(layout, model, sc.Catalog, lineEval, sc.Mystery, lineCells);
+            if (sc.Floating.Active) report.Floating = sc.Floating.Description;
+            var blocking = sc.Catalog.Entries.Where(e => e.ActsOnLines && !sc.Mystery.Handled.Contains(e) && !sc.Floating.Handled.Contains(e)).ToList();
             if (blocking.Count > 0)
                 throw new NotSupportedException($"Replacement {blocking[0]} can change symbols on paylines" +
                                                 (blocking.Count > 1 ? $" (+{blocking.Count - 1} more)" : "") + "; not supported analytically yet.");
 
             // ---- Lines ----
             lineTimer.Start();
-            foreach (int line in setup.BetLines)
+            double Evaluate(List<List<(double p, AGTSymbol s)>> dists)
             {
-                var cells = setup.LineCells[line];
-                foreach (var outcome in sc.Mystery.Outcomes)
+                string signature = string.Join(";", dists.Select(d => string.Join(",", d.Select(x => x.s.Name.CString + ":" + x.p.ToString("R")))));
+                if (!lineCache.TryGetValue(signature, out double e)) lineCache[signature] = e = lineEval.ExpectedLineWin(dists);
+                return e;
+            }
+            if (!sc.Floating.Active)
+            {
+                foreach (int line in setup.BetLines)
                 {
-                    var dists = cells.Select(c => LineEvaluator.CellDistribution(model.Reels[c.reel], c.reel, c.window, sc.Mystery, outcome)).ToList();
-                    string signature = string.Join(";", dists.Select(d => string.Join(",", d.Select(x => x.s.Name.CString + ":" + x.p.ToString("R")))));
-                    if (!lineCache.TryGetValue(signature, out double e)) lineCache[signature] = e = lineEval.ExpectedLineWin(dists);
-                    sc.LineWin += outcome.Probability * e;
+                    var cells = setup.LineCells[line];
+                    foreach (var outcome in sc.Mystery.Outcomes)
+                    {
+                        var dists = cells.Select(c => LineEvaluator.CellDistribution(model.Reels[c.reel], c.reel, c.window, sc.Mystery, outcome)).ToList();
+                        sc.LineWin += outcome.Probability * Evaluate(dists);
+                    }
+                }
+            }
+            else
+            {
+                // Condition on the driver reels: they decide the mystery outcome and which floating replacements fire.
+                Log($"floating: {sc.Floating.Description}; asking the engine which replacements fire");
+                sc.Floating.Progress = Log;
+                sc.Floating.Calibrate(dat, betPerLine, lines, setup, OraclePathLimit);
+                Log($"floating: oracle done ({sc.Floating.OracleActs:N0} engine acts); computing lines");
+                report.OracleActs += sc.Floating.OracleActs;
+                var floatCache = new Dictionary<string, double>(StringComparer.Ordinal);
+                foreach (var (weight, stops, key) in sc.Floating.DriverConfigurations())
+                {
+                    var outcome = sc.Mystery.SourceReels.Count > 0 ? sc.Mystery.OutcomeFor(model, stops) : sc.Mystery.Outcomes[0];
+                    foreach (var (pf, mask) in sc.Floating.Firing(key))
+                        foreach (int line in setup.BetLines)
+                        {
+                            var cells = setup.LineCells[line];
+                            var dists = cells.Select(c => LineEvaluator.CellDistribution(model.Reels[c.reel], c.reel, c.window, sc.Mystery, outcome)).ToList();
+                            string fkey = mask + "#" + string.Join(";", cells) + "#" + string.Join(";", dists.Select(d => string.Join(",", d.Select(x => x.s.Name.CString + ":" + x.p.ToString("R")))));
+                            if (!floatCache.TryGetValue(fkey, out double e))
+                                floatCache[fkey] = e = sc.Floating.ExpectedLineWin(cells, dists, mask, Evaluate) - sc.Floating.Correction(cells, outcome, mask, Evaluate);
+                            sc.LineWin += weight * pf * e;
+                        }
                 }
             }
             lineTimer.Stop();
 
             // ---- Everything else ----
+            Log("lines done; non-line part");
             otherTimer.Start();
-            ComputeNonLine(sc, host, report, preferCount: true);
+            if (SkipNonLine) sc.NonLineError = "skipped (--lines-only)";
+            else
+            {
+                try { ComputeNonLine(sc, host, report, preferCount: true); }
+                catch (NotSupportedException e) { sc.NonLineError = e.Message; }
+            }
+            Log("non-line done");
             otherTimer.Stop();
         }
         report.DistinctLineModels = lineCache.Count;
@@ -151,13 +208,18 @@ public sealed class AnalyticBaseGame
 
         if (verify)
         {
+            Log("verifying against the engine");
             Verify(report, host, scenarios, lineEval);
             // A count model that disagrees with the engine is replaced by the general evaluator.
-            if (report.ScatterMismatches > 0 && scenarios.Any(s => s.Count is not null))
+            if (report.ScatterMismatches > 0 && scenarios.Any(s => s.Count is not null) && !report.LinesOnly)
             {
                 report.Notes.Add("scatter-count model disagreed with the engine; recomputed with the general evaluator");
                 otherTimer.Start();
-                foreach (var sc in scenarios) ComputeNonLine(sc, host, report, preferCount: false);
+                foreach (var sc in scenarios)
+                {
+                    try { ComputeNonLine(sc, host, report, preferCount: false); sc.NonLineError = null; }
+                    catch (NotSupportedException e) { sc.NonLineError = e.Message; }
+                }
                 otherTimer.Stop();
                 report.ScatterTime = otherTimer.Elapsed;
                 Combine(report, scenarios);
@@ -193,9 +255,10 @@ public sealed class AnalyticBaseGame
     private static void Combine(Report report, List<Scenario> scenarios)
     {
         report.ExpectedLineWin = scenarios.Sum(s => s.Weight * s.LineWin);
-        report.ExpectedNonLineWin = scenarios.Sum(s => s.Weight * s.NonLineWin);
-        report.TriggerProbability = scenarios.Sum(s => s.Weight * s.Trigger);
-        report.NonLineMethod = string.Join(", ", scenarios.Select(s => s.Count is not null ? "scatter-count" : "general").Distinct());
+        report.NonLineError = scenarios.Select(s => s.NonLineError).FirstOrDefault(e => e is not null);
+        report.ExpectedNonLineWin = report.LinesOnly ? double.NaN : scenarios.Sum(s => s.Weight * s.NonLineWin);
+        report.TriggerProbability = report.LinesOnly ? double.NaN : scenarios.Sum(s => s.Weight * s.Trigger);
+        report.NonLineMethod = report.LinesOnly ? "not supported" : string.Join(", ", scenarios.Select(s => s.Count is not null ? "scatter-count" : "general").Distinct());
     }
 
     private void ComputeNonLine(Scenario sc, GameHost host, Report report, bool preferCount)
@@ -283,6 +346,12 @@ public sealed class AnalyticBaseGame
         return result;
     }
 
+    private GameHost LoadSampler(GameHost fallback)
+    {
+        try { return GameHost.Load(dat, betPerLine, lines, 41, suppressFeatureEntry: true, lenient: true); }
+        catch (NotSupportedException) { return fallback; }
+    }
+
     private bool TrySuppress()
     {
         try { GameHost.Load(dat, betPerLine, lines, 3, suppressFeatureEntry: true); return true; }
@@ -296,8 +365,10 @@ public sealed class AnalyticBaseGame
     private void Verify(Report report, GameHost host, List<Scenario> scenarios, LineEvaluator lineEval)
     {
         var sw = Stopwatch.StartNew();
-        var rng = new System.Random(4242);
-        var enumerator = new ActEnumerator(host, new DrawPartition(host.Game)) { PathLimitPerAct = OraclePathLimit };
+        var rng = new System.Random(VerifySeed);
+        GameHost? sampler = null; bool samplerTriggerUnknown = false;
+        // Exact per-check enumeration up to 2,000 in-spin branches; beyond that the check samples the draws.
+        var enumerator = new ActEnumerator(host, new DrawPartition(host.Game)) { PathLimitPerAct = Math.Min(OraclePathLimit, 2_000) };
         int baseIndex = host.BaseLayoutIndex;
         bool Same(double a, double b) => Math.Abs(a - b) <= 1e-9 * Math.Max(1, Math.Abs(a));
         var scatterLike = new HashSet<string>(scenarios[0].Setup.ScatterSymbols, StringComparer.Ordinal);
@@ -323,7 +394,7 @@ public sealed class AnalyticBaseGame
             // so the replacement rules are exercised rather than only plain symbols.
             if (i % 3 == 2 && line >= 0)
             {
-                var inputs = new HashSet<string>(sc.Catalog.Entries.Where(e => sc.Mystery.Handled.Contains(e)).SelectMany(e => e.Inputs), StringComparer.Ordinal);
+                var inputs = new HashSet<string>(sc.Catalog.Entries.Where(e => sc.Mystery.Handled.Contains(e) || sc.Floating.Handled.Contains(e)).SelectMany(e => e.Inputs), StringComparer.Ordinal);
                 if (inputs.Count > 0)
                     foreach (var (reel, window) in setup.LineCells[line])
                     {
@@ -332,37 +403,78 @@ public sealed class AnalyticBaseGame
                     }
             }
 
+            // Engine: exact over all in-spin draws when feasible, otherwise sampled.
             double engineLine = 0, engineNonLine = 0, engineTrigger = 0;
-            enumerator.Enumerate(stops, (h, res, w) =>
+            double seLine = 0, seNonLine = 0, seTrigger = 0; bool sampled = false;
+            try
             {
-                if (line >= 0) engineLine += w * h.LineWin(line);
-                engineNonLine += w * ((double)res.Credited[baseIndex] - h.AllLineWins());
-                bool t = h.FeatureEntrySuppressed ? h.FeatureEntryTriggered() : res.LeftBase;
-                if (t) engineTrigger += w;
-            });
+                enumerator.Enumerate(stops, (h, res, w) =>
+                {
+                    if (line >= 0) engineLine += w * h.LineWin(line);
+                    engineNonLine += w * ((double)res.Credited[baseIndex] - h.AllLineWins());
+                    bool t = h.FeatureEntrySuppressed ? h.FeatureEntryTriggered() : res.LeftBase;
+                    if (t) engineTrigger += w;
+                });
+            }
+            catch (NotSupportedException)
+            {
+                // Too many in-spin branches (e.g. several floating placements): sample them instead.
+                sampled = true; report.SampledChecks++;
+                // Sample on an engine with feature entry switched off, so triggering spins need no restore.
+                sampler ??= LoadSampler(host);
+                int n = SampledDraws; double l1 = 0, l2 = 0, o1 = 0, o2 = 0, t1 = 0;
+                for (int k = 0; k < n; k++)
+                {
+                    sampler.EnsureBase();
+                    sampler.Agent.BeginScripted(setup.PrepareValues, setup.PrepareRanges, setup.PrepareValues.Count, randomTail: true);
+                    sampler.BeginAccounting();
+                    sampler.Session.Prepare(betPerLine, lines);
+                    int played = (int)sampler.Game.CurrentLayoutIndex;
+                    sampler.Session.Complete(stops);
+                    var res = sampler.EndAccounting(played);
+                    double lw = line >= 0 ? sampler.LineWin(line) : 0, ow = (double)res.Credited[baseIndex] - sampler.AllLineWins();
+                    bool t = sampler.FeatureEntrySuppressed ? sampler.FeatureEntryTriggered() : res.LeftBase;
+                    l1 += lw; l2 += lw * lw; o1 += ow; o2 += ow * ow; if (t) t1++;
+                }
+                if (!sampler.FeatureEntryDetectionComplete) samplerTriggerUnknown = true;
+                engineLine = l1 / n; engineNonLine = o1 / n; engineTrigger = t1 / n;
+                seLine = Math.Sqrt(Math.Max(l2 / n - engineLine * engineLine, 0) / n);
+                seNonLine = Math.Sqrt(Math.Max(o2 / n - engineNonLine * engineNonLine, 0) / n);
+                seTrigger = Math.Sqrt(Math.Max(engineTrigger * (1 - engineTrigger), 0) / n);
+            }
+            if (Verbose && (i < 5 || i % 10 == 0)) Log($"check {i + 1}/{VerifySamples}: {(sampled ? "sampled" : "exact")}");
+            bool Agree(double engine, double model, double se) => sampled ? Math.Abs(engine - model) <= 4 * se + 1e-9 : Same(engine, model);
 
             if (line >= 0)
             {
                 var outcome = sc.Mystery.OutcomeFor(model, stops);
-                var cellDists = setup.LineCells[line].Select(c => sc.Mystery.Effective(c.reel, c.window, model.Reels[c.reel].WindowSymbols[stops[c.reel]][c.window], outcome)).ToList();
-                double modelLine = lineEval.ExpectedLineWin(cellDists);
+                var cells = setup.LineCells[line];
+                var cellDists = cells.Select(c => sc.Mystery.Effective(c.reel, c.window, model.Reels[c.reel].WindowSymbols[stops[c.reel]][c.window], outcome)).ToList();
+                double modelLine = 0;
+                if (sc.Floating.Active)
+                    foreach (var (pf, mask) in sc.Floating.FiringFor(stops))
+                        modelLine += pf * sc.Floating.ExpectedLineWin(cells, cellDists, mask, d => lineEval.ExpectedLineWin(d), sc.Floating.ScreenEligible(stops, mask, outcome));
+                else modelLine = lineEval.ExpectedLineWin(cellDists);
                 var tuple = cellDists.Select(d => d.Count == 1 ? d[0].s : new AGTSymbol()).ToArray();
                 report.VerifiedLines++;
-                if (!Same(engineLine, modelLine))
+                if (!Agree(engineLine, modelLine, seLine))
                 {
                     report.LineMismatches++;
                     if (report.MismatchExamples.Count < 5)
-                        report.MismatchExamples.Add($"line {line}: [{string.Join(" ", tuple.Select(s => s.Name.IsEmpty ? "?" : s.Name.CString))}] engine {engineLine} model {modelLine}");
+                        report.MismatchExamples.Add($"line {line}: [{string.Join(" ", tuple.Select(s => s.Name.IsEmpty ? "?" : s.Name.CString))}] engine {engineLine}{(sampled ? $" +/- {seLine:G3}" : "")} model {modelLine}");
                 }
             }
 
-            var (modelWin, modelTrigger) = sc.Predict(stops);
-            report.VerifiedScatter++;
-            if (!Same(engineNonLine, modelWin) || !Same(engineTrigger, modelTrigger))
+            if (sc.NonLineError is null && !(sampled && samplerTriggerUnknown))
             {
-                report.ScatterMismatches++;
-                if (report.MismatchExamples.Count < 5)
-                    report.MismatchExamples.Add($"non-line stops [{string.Join(",", stops)}]: engine win {engineNonLine} trig {engineTrigger}, model win {modelWin} trig {modelTrigger}");
+                var (modelWin, modelTrigger) = sc.Predict(stops);
+                report.VerifiedScatter++;
+                if (!Agree(engineNonLine, modelWin, seNonLine) || !Agree(engineTrigger, modelTrigger, seTrigger))
+                {
+                    report.ScatterMismatches++;
+                    if (report.MismatchExamples.Count < 5)
+                        report.MismatchExamples.Add($"non-line stops [{string.Join(",", stops)}]: engine win {engineNonLine} trig {engineTrigger}, model win {modelWin} trig {modelTrigger}");
+                }
             }
         }
         report.VerifyTime = sw.Elapsed;

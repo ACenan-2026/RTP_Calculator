@@ -56,9 +56,9 @@ public sealed class GameHost
     /// after warm-up (see <see cref="FeatureEntryTriggers"/>), so base acts never change state and never
     /// need restoring. Feature entry is then detected from the trigger pay condition instead.
     /// </summary>
-    public static GameHost Load(byte[] dat, uint betPerLine, uint lines, int seed = 1, bool suppressFeatureEntry = false)
+    public static GameHost Load(byte[] dat, uint betPerLine, uint lines, int seed = 1, bool suppressFeatureEntry = false, bool lenient = false)
     {
-        var host = new GameHost(dat, betPerLine, lines, seed);
+        var host = new GameHost(dat, betPerLine, lines, seed) { lenient = lenient };
         host.WarmUpAndSnapshot(suppressFeatureEntry);
         return host;
     }
@@ -70,6 +70,12 @@ public sealed class GameHost
     /// </summary>
     public HashSet<string> FeatureEntryTriggers { get; } = new HashSet<string>(StringComparer.Ordinal);
     public bool FeatureEntrySuppressed { get; private set; }
+    private bool lenient;
+    /// <summary>
+    /// False when (lenient mode) some feature strategies were switched off without a base pay condition to detect
+    /// them by: FeatureEntryTriggered may then miss entries. Fine for measuring line wins only.
+    /// </summary>
+    public bool FeatureEntryDetectionComplete { get; private set; } = true;
 
     /// <summary>In suppressed mode: did a feature-entry trigger pay condition win in the act just played?</summary>
     public bool FeatureEntryTriggered()
@@ -129,6 +135,10 @@ public sealed class GameHost
         {
             var strategy = entry.Value;
             if (!strategy.Enabled || strategy.Layout.CString == baseName) continue;
+            if (!payConditionNames.Contains(entry.Key) && lenient)
+            {
+                strategy.Enabled = false; FeatureEntryDetectionComplete = false; continue;
+            }
             if (!payConditionNames.Contains(entry.Key))
                 throw new NotSupportedException(
                     $"Strategy '{strategy.Name.CString}' (to layout '{strategy.Layout.CString}') is triggered by '{entry.Key}', which is not a " +
@@ -137,6 +147,17 @@ public sealed class GameHost
             strategy.Enabled = false;
         }
         FeatureEntrySuppressed = true;
+    }
+
+    /// <summary>
+    /// Apply a change to both the live game and its snapshot, so it survives restores. Used only by
+    /// analysis-only engine instances (e.g. an oracle that must not perform certain replacements);
+    /// it never touches files or the engine source.
+    /// </summary>
+    public void Mutate(Action<AGTReelGame> change)
+    {
+        change(Game);
+        if (snapshot is not null) change(snapshot);
     }
 
     /// <summary>Return the live game to the snapshot state.</summary>

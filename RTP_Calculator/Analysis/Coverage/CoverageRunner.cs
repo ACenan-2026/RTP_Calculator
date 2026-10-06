@@ -71,7 +71,7 @@ public sealed class CoverageRunner
             row.Seconds = sw.Elapsed.TotalSeconds;
             rows.Add(row);
             if (CsvPath is not null) WriteCsv(CsvPath, rows);
-            Console.WriteLine($"  {row.Status,-12} {row.File,-42} {Short(row.Blocker, 90)}{(row.Status == "ANALYTIC" ? $" lines {row.LineRtp:F6} other {row.NonLineRtp:F6} hit 1/{row.HitRate:F2} {row.Verify}" : "")}  ({row.Seconds:F0}s)");
+            Console.WriteLine($"  {row.Status,-12} {row.File,-42} {Short(row.Blocker, 90)}{(row.Status is "ANALYTIC" or "LINES-ONLY" ? $" lines {row.LineRtp:F6} other {row.NonLineRtp:F6} hit 1/{row.HitRate:F2} {row.Verify}" : "")}  ({row.Seconds:F0}s)");
         }
         return rows;
     }
@@ -98,10 +98,11 @@ public sealed class CoverageRunner
             {
                 row.Verify = $"verify {r.VerifiedLines - r.LineMismatches}/{r.VerifiedLines} lines, {r.VerifiedScatter - r.ScatterMismatches}/{r.VerifiedScatter} other [{r.NonLineMethod}, {r.Scenarios} scen.]";
                 bool ok = r.LineMismatches == 0 && r.ScatterMismatches == 0;
-                row.Status = ok ? "ANALYTIC" : "VERIFY-FAIL";
+                row.Status = !ok ? "VERIFY-FAIL" : r.LinesOnly ? "LINES-ONLY" : "ANALYTIC";
+                if (ok && r.LinesOnly) row.Blocker = "non-line: " + r.NonLineError;
                 if (!ok) row.Blocker = string.Join(" / ", r.MismatchExamples.Take(2));
             }
-            else row.Status = "ANALYTIC";
+            else { row.Status = r.LinesOnly ? "LINES-ONLY" : "ANALYTIC"; if (r.LinesOnly) row.Blocker = "non-line: " + r.NonLineError; }
         }
         catch (NotSupportedException e) { row.Status = "UNSUPPORTED"; row.Blocker = e.Message; }
     }

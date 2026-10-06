@@ -36,6 +36,8 @@ Options:
   --samples N        Samples per self-test check (default 200)
   --always-restore   Restore the engine snapshot before every enumerated path (slower, fewer assumptions)
   --per-line         Compute every bet line separately instead of using line symmetry
+  --lines-only       analytic: compute line wins only (skip the non-line part)
+  --verify-seed N    analytic: seed for the verification screens (default 4242)
   --ref-lines X      Reference value for base line RTP (e.g. from the PAR sheet), for comparison
   --ref-nonline X    Reference value for base non-line RTP
   --ref-hit X        Reference feature hit rate (1 in X)
@@ -156,11 +158,12 @@ A .agm input is compiled to a temporary .dat with the AGT compiler; the .agm is 
         {
             Console.WriteLine("=== Analytic base game (reel design) ===");
             var sw = Stopwatch.StartNew();
-            var r = new Analysis.Analytic.AnalyticBaseGame(dat, o.Bet, o.Lines) { VerifySamples = o.Samples }.Run(verify: o.Samples > 0);
+            var r = new Analysis.Analytic.AnalyticBaseGame(dat, o.Bet, o.Lines) { VerifySamples = o.Samples, SkipNonLine = o.LinesOnly, Verbose = true, VerifySeed = o.VerifySeed }.Run(verify: o.Samples > 0);
             Console.WriteLine($"  Mystery construct    : {r.Mystery}");
             Console.WriteLine($"  Reel group sets      : {r.ReelGroupSets}");
             Console.WriteLine($"  Spin scenarios       : {r.Scenarios} (outcomes of the draws made while preparing the spin)");
-            Console.WriteLine($"  Non-line method      : {r.NonLineMethod}");
+            Console.WriteLine($"  Floating (lines)     : {r.Floating}");
+            Console.WriteLine($"  Non-line method      : {r.NonLineMethod}{(r.LinesOnly ? " - " + r.NonLineError : "")}");
             Console.WriteLine($"  Lines                : {r.BetLines} bet lines, {r.LinePayConditions} line pay conditions, {r.DistinctLineModels} distinct line models");
             Console.WriteLine($"                         {r.TuplesVisited:N0} symbol tuples, {r.PayEvaluations:N0} engine pay evaluations, {r.LineTime.TotalSeconds:F2} s");
             Console.WriteLine($"  Scatter oracle       : {r.OracleConfigurations} configurations, {r.OracleActs:N0} engine acts, {r.ScatterTime.TotalSeconds:F2} s");
@@ -181,6 +184,7 @@ A .agm input is compiled to a temporary .dat with the AGT compiler; the .agm is 
             {
                 ok = r.LineMismatches == 0 && r.ScatterMismatches == 0;
                 Console.WriteLine();
+                if (r.SampledChecks > 0) Console.WriteLine($"  ({r.SampledChecks} checks sampled the engine's in-spin draws instead of enumerating them; tolerance 4 s.e.)");
                 Console.WriteLine($"  Verification vs full engine ({r.VerifyTime.TotalSeconds:F1} s): " +
                                   $"lines {r.VerifiedLines - r.LineMismatches}/{r.VerifiedLines} agree, scatter/trigger {r.VerifiedScatter - r.ScatterMismatches}/{r.VerifiedScatter} agree " +
                                   (ok ? "- PASS" : "- FAIL"));

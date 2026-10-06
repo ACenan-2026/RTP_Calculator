@@ -24,6 +24,8 @@ public sealed class Options
     public int SubShardIndex { get; private set; }
     public int SubShardCount { get; private set; } = 1;
     public bool ScanOnly { get; private set; }
+    public bool LinesOnly { get; private set; }
+    public int VerifySeed { get; private set; } = 4242;
     public string? Out { get; private set; }
     public string? Filter { get; private set; }
     public (int from, int count)? Range { get; private set; }
@@ -62,6 +64,8 @@ public sealed class Options
                     if (o.SubShardCount < 1 || o.SubShardIndex < 0 || o.SubShardIndex >= o.SubShardCount) throw new ArgumentException("--subshard expects j/m with 0 <= j < m.");
                     break;
                 case "--scan-only": o.ScanOnly = true; break;
+                case "--lines-only": o.LinesOnly = true; break;
+                case "--verify-seed": o.VerifySeed = int.Parse(Next(), CultureInfo.InvariantCulture); break;
                 case "--out": o.Out = Next(); break;
                 case "--filter": o.Filter = Next(); break;
                 case "--range":

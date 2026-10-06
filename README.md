@@ -55,7 +55,8 @@ RTP_Calculator analytic "...\LaughingDragon.dat" --lines 50 --samples 200 --ref-
 |---|---|---|---|
 | First analytic version | 30 | 58 | 18 |
 | After the replacement work | 41 | 65 | 0 |
-| Current (ReelGroupSet outcomes) | **43** | 63 | **0** |
+| After ReelGroupSet outcomes | 43 | 63 | 0 |
+| Current (floating replacements) | **51** + 8 lines-only | 47 | **0** |
 
 All 107 distinct games were run; CoinKingdomAztec timed out in the sandbox and is included under "Not supported".
 
@@ -75,16 +76,40 @@ What changed between the two runs:
 - **Simulated paid spin only:** 0.24582 ± 0.00113.
 - **Simulated base layout total:** 0.24942. The extra 0.0036 is booked to the base layout during features.
 
+### Floating replacements (`FloatingModel`)
+
+When a trigger wins, the engine draws a replacement name N times. Each time the name maps to a symbol, it puts that symbol in a uniformly random eligible target cell, and a cell is never picked twice (`AGTLayout.UpdateFloatingReplacements`). The tool handles three shapes exactly:
+
+- **Placement** (original set matches any symbol, e.g. `s_any`, `s_Any`). Where symbols land doesn't depend on the reels. For one line, the probability that K placements among m targets hit a particular set S of its cells is C(m−|S∩line|, K−|S|)/C(m, K). Each hit cell gets an independently drawn mapped symbol. Symbols that can't take part in a line win are grouped together. Examples: MegaLoot F1–F4, Rings of Fortune coins.
+- **Per-cell** (specific original symbols, and N is at least the most cells that could be eligible). Every eligible cell is replaced independently.
+- **Partial** (specific symbols, but more cells can be eligible than N; e.g. Cash Cave `My → Jk` with 5 picks and up to 12 `My`). The main calculation replaces every eligible cell. An exact correction is then added over the screens with more than N eligible cells: these are enumerated per reel by which target windows show the symbol, and the engine's capped uniform choice is applied.
+
+**Conditioning on driver reels.** Triggers must be located wins on reels with no payline cells. The tool follows replacement chains backwards (a trigger cell written by another replacement depends on that replacement's trigger) to find the "driver" reels, and adds single-cell hidden selector reels. It then computes each driver-window combination separately.
+
+**Engine oracle.** For each driver-window combination, an analysis-only engine instance says which of these replacements fire. In that instance, these replacements, and every replacement that can't reach a trigger cell, are switched off (their original set points at an empty set). That keeps its enumeration small. The instance also checks, on other reel stops, that firing really depends only on the driver reels.
+
+**Sampled verification.** When a spin has too many in-spin branches to enumerate exactly (e.g. six coin placements), the check against the full engine uses 2,000 random in-spin draws for those stops, with a tolerance of 4 s.e. This runs on an engine with feature entry switched off, so no restore is needed. `--verify-seed` lets separate runs check different screens.
+
+**Lines-only results.** If the non-line part can't be computed (e.g. Rings of Fortune: about 10^13 special-symbol configurations), `analytic` still gives the exact, verified line RTP and reports the non-line part as not supported. `coverage` marks these games LINES-ONLY. `--lines-only` skips the non-line part on purpose.
+
+**Cash Cave Rings of Fortune check against the PAR sheet** (`CashCaveRingsOfFortune_96.xlsx`; 75 lines, cost 75):
+
+| | RTP_Calculator (analytic) | Sheet (WinEngine simulation, 2.87 billion games) |
+|---|---|---|
+| Base line RTP | 0.277594 | 0.277611 |
+
+The difference is −1.7e-5. The sheet's own sampling error is about 1.6e-5 (scaled from a 300k-game run), so they agree. The calculation took about 30 s, with 3 reel-group scenarios and 16 driver configurations. 36 sampled engine checks agree. The sheet's H&S hit rate of 1 in 100 matches the hidden selector reel, which shows `yes` on 1 of its 100 stops. The tool doesn't compute that figure yet, because the non-line part isn't supported for this game.
+
 Remaining blockers, and what would fix each:
 
 | Games | Blocker | Next step |
 |---|---|---|
-| 20 | Floating replacement changes payline symbols (`any` → F1–F4, coins, etc.; includes the Rings of Fortune and MegaLoot families) | Floating evaluator: work out each placement outcome separately |
 | 13 | Metamorphic tokens accumulate in base | Needs a state (Markov) model, the same work as features |
-| 12 | General non-line evaluator needs more than 20k configurations | Prune special symbols that never matter; parallelise; use the count model per symbol class |
-| 8 | Mapped replacement changes payline symbols (incl. Magnet Storm family) | Mapped evaluator |
+| 12 + 8 lines-only | General non-line evaluator needs too many configurations (Rings of Fortune: ~10^13; Cash Stacks: 240k) | Prune special symbols that never matter; reuse the floating-model conditioning for coin and prize placements; count model per symbol class |
+| 10 | Mapped replacement changes payline symbols (Magnet Storm family, NewConcept2, …) | Mapped evaluator, same approach as floating |
 | 4 | Uniform draws over large ranges (random credit values) | Use the expected value directly |
 | 3 | In-spin branches over the coverage limit (20k) | Run `analytic` directly (5M limit) or add pruning |
+| 2 | Floating replacement triggered by visible scatters (DragonWaves, ZhongKui) | Condition on the scatter count |
 | 2 | Payline cells on a column with no reel | Investigate |
 | 1 | Random-per-cell replacement with a conditional trigger | Condition on the trigger |
 | 1 | Time limit | Run outside the sandbox |
@@ -166,6 +191,6 @@ That leads to four conclusions:
 | `Analysis/Exact/BaseGameExact.cs` | The base-game split (engine-driven exact mode) |
 | `Analysis/Exact/SelfTest.cs` | Assumption checks A–G for exact mode |
 | `Analysis/MonteCarlo.cs`, `DrawProfiler.cs` | Simulation cross-check and feasibility profile |
-| `Analysis/Analytic/*.cs` | Analytic (reel-design) evaluators: `ReplacementCatalog`, `MysteryModel` (per-cell replacement pipeline), `LineEvaluator`, `ScatterEvaluator`, `SpecialSymbolEvaluator`, `AnalyticBaseGame` |
+| `Analysis/Analytic/*.cs` | Analytic (reel-design) evaluators: `ReplacementCatalog`, `MysteryModel` (per-cell replacement pipeline), `FloatingModel`, `LineEvaluator`, `ScatterEvaluator`, `SpecialSymbolEvaluator`, `AnalyticBaseGame` |
 | `Analysis/Coverage/*.cs` | Construct scanner and folder coverage runner |
 | `Util/GameFiles.cs` | Loading `.dat` / compiling `.agm` |

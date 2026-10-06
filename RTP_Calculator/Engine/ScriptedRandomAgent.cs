@@ -24,6 +24,7 @@ public sealed class ScriptedRandomAgent : IRandomNumberAgent
     public ScriptedRandomAgent(int seed) => random = new System.Random(seed);
 
     public bool Scripted { get; private set; }
+    public bool RandomTail { get; private set; }
 
     /// <summary>Ranges of the draws made since the last Begin call (scripted mode only).</summary>
     public List<uint> Ranges { get; } = new List<uint>(128);
@@ -39,16 +40,22 @@ public sealed class ScriptedRandomAgent : IRandomNumberAgent
 
     public void BeginRandom()
     {
-        Scripted = false; position = 0; Ranges.Clear(); Values.Clear();
+        Scripted = false; RandomTail = false; position = 0; Ranges.Clear(); Values.Clear();
     }
 
     /// <summary>
     /// Replay <paramref name="values"/> (which were drawn from <paramref name="ranges"/>) for the first
     /// draws, then return 0 for every later draw.
     /// </summary>
-    public void BeginScripted(List<uint> values, List<uint> ranges, int length)
+    public void BeginScripted(List<uint> values, List<uint> ranges, int length) => BeginScripted(values, ranges, length, randomTail: false);
+
+    /// <summary>
+    /// Like <see cref="BeginScripted(List{uint}, List{uint}, int)"/>; with <paramref name="randomTail"/> the draws after the
+    /// prefix are random instead of 0 (used to sample an act within a fixed preparation scenario).
+    /// </summary>
+    public void BeginScripted(List<uint> values, List<uint> ranges, int length, bool randomTail)
     {
-        Scripted = true; position = 0; Ranges.Clear(); Values.Clear();
+        Scripted = true; RandomTail = randomTail; position = 0; Ranges.Clear(); Values.Clear();
         prefixLength = length;
         if (prefixValues.Length < length)
         {
@@ -87,7 +94,7 @@ public sealed class ScriptedRandomAgent : IRandomNumberAgent
                         "The act did not replay deterministically from the restored state.");
                 value = prefixValues[position];
             }
-            else value = 0;
+            else value = RandomTail ? Next(range) : 0;
             Ranges.Add(range);
             Values.Add(value);
         }
