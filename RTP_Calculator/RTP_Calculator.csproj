@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    RTP_Calculator - proof of concept for exact RTP derivation using the real AGT win engine.
+    Targets .NET Framework 4.7.2 to match AgtEngine.Core / AgtCompiler.Core.
+    The engine projects are referenced, never copied or modified.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net472</TargetFramework>
+    <PlatformTarget>x64</PlatformTarget>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>RTP_Calculator</RootNamespace>
+    <AssemblyName>RTP_Calculator</AssemblyName>
+    <!-- Keep the existing Properties/AssemblyInfo.cs created by the VS template. -->
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <CheckForOverflowUnderflow>false</CheckForOverflowUnderflow>
+    <Optimize Condition="'$(Configuration)' == 'Release'">true</Optimize>
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <!-- Location of the C# engine port. Override on the command line if the repo lives elsewhere. -->
+    <WinEngineRepo Condition="'$(WinEngineRepo)' == ''">$(MSBuildThisFileDirectory)..\..\WinEngineGameCompiler_DOTNET\</WinEngineRepo>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="$(WinEngineRepo)AGT\WinEngine_RGS\AgtEngine.Core.csproj" />
+    <ProjectReference Include="$(WinEngineRepo)AGT\WinEngine_RGS\Designer\Compiler\AgtCompiler.Core.csproj" />
+  </ItemGroup>
+</Project>

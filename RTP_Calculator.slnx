@@ -1,0 +1,8 @@
+<Solution>
+  <Project Path="RTP_Calculator/RTP_Calculator.csproj" />
+  <Folder Name="/WinEngine (referenced, read-only)/">
+    <Project Path="../WinEngineGameCompiler_DOTNET/AGT/WinEngine.Managed/AgtEngine.Contracts.csproj" />
+    <Project Path="../WinEngineGameCompiler_DOTNET/AGT/WinEngine_RGS/AgtEngine.Core.csproj" />
+    <Project Path="../WinEngineGameCompiler_DOTNET/AGT/WinEngine_RGS/Designer/Compiler/AgtCompiler.Core.csproj" />
+  </Folder>
+</Solution>

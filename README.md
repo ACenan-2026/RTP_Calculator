@@ -1,0 +1,100 @@
+# RTP_Calculator: proof of concept
+
+This tool works out exact RTP figures by driving the real AGT win engine (`AgtEngine.Core`, the C# port). It doesn't rewrite any of the engine's rules. It references the engine and compiler projects in `WinEngineGameCompiler_DOTNET` without changing them, and it never modifies `.agm` files.
+
+## Laughing Dragon results
+
+Base game: 50 lines × 1 credit, total bet 50. Reference values come from `LaughingDragonV1E.xlsx`, sheet Summary.
+
+| Quantity | RTP_Calculator (exact) | Excel | Difference |
+|---|---|---|---|
+| Base line RTP | 0.37512486082128127 | 0.37512486082128127 | 0 |
+| Base non-line RTP (trigger prizes) | 0.10003509749152246 | 0.1000350974915225 | 4e-17 |
+| Feature hit rate | 1 in 90.11777957344695 | 1 in 90.11777957344 | matches to 12 significant figures |
+| Base RTP (total) | 0.47516 | 0.47516 | |
+
+Three independent checks agree with these figures:
+
+- **Independent script.** A separate Python calculation of the line RTP, written straight from the `.agm` reels and paytable without the engine, gives 0.3751248608212812.
+- **Simulation.** A 400,000-game simulation through the same engine gave a base RTP of 0.4772 ± 0.0031, which is consistent with the exact figure.
+- **Self-test.** Every assumption the calculation relies on passes its check (see below).
+
+The feature (LBF) is not computed exactly yet; see "What this proof of concept shows".
+
+## How it works
+
+1. **Hook the RNG.** Every random number the engine uses goes through `IRandomNumberAgent`. `ScriptedRandomAgent` replaces it: it replays a set sequence of values and records the range of every draw.
+2. **Enumerate one spin exactly** (`ActEnumerator`). The tool replays a spin from a snapshot, branch by branch, depth-first, until it has covered every in-spin draw (replacements, weighted picks and so on). Weighted tables are collapsed into cells (`DrawPartition`). For example, a draw from range 100 with weights 60/25/10/4/1 becomes 5 branches, not 100, and a 10,000,000-weight table becomes a handful.
+3. **Split up the base game** (`BaseGameExact`). Brute force would be 35×36×53×62×64×300 ≈ 7.9e10 reel-stop combinations, before counting the in-spin draws, so the base game is split into parts where each reel's stops can be grouped:
+   - **Lines.** A line's win depends only on its own cells, so stops are grouped by the symbol they put on the line: 3.77M engine configurations. All 50 lines have the same distribution (one cell per unweighted reel), so the tool computes one line and multiplies by 50.
+   - **Non-line wins and the trigger.** These depend only on where scatter symbols land: 1,024 configurations.
+   - Hidden reels, such as the mystery-symbol selector, are grouped by their full window.
+4. **Feature-entry suppression.** A spin that triggers the feature changes engine state, and restoring the snapshot costs about 10 ms. In the base-game passes, the strategies that leave the base game are disabled. The tool then detects the trigger from the trigger pay condition (`LB_Trigger`), because the engine keys each strategy by its trigger name. Self-test check G confirms this gives identical wins and identical trigger detection.
+
+## Self-test (`selftest`)
+
+| Check | What it verifies |
+|---|---|
+| A | Reel strips don't change during play |
+| B | The credited win equals the sum of the engine's win records |
+| C | Replaying a spin is deterministic, and skipping the restore after a non-triggering spin gives the same results |
+| D | A line's expected win depends only on its own cells |
+| E | Non-line wins and the trigger depend only on scatter positions |
+| F | The exact in-spin enumeration agrees with random play for the same stops |
+| G | Feature-entry suppression changes nothing except the transition |
+
+All checks pass for Laughing Dragon. If any check fails for another game, don't trust that game's exact figures until the cause is understood.
+
+## Build and run
+
+- Open `RTP_Calculator.slnx` in Visual Studio and build in Release. The target is net472 x64, the same as the engine.
+- Delete the old `bin`/`obj` folders first. They were created by the previous old-style project file.
+- The project expects `WinEngineGameCompiler_DOTNET` to sit next to `RTP_Calculator`. If it doesn't, pass `/p:WinEngineRepo=<path>\`.
+
+```
+RTP_Calculator selftest   "...\LaughingDragon.dat"
+RTP_Calculator profile    "...\LaughingDragon.dat"
+RTP_Calculator exact-base "...\LaughingDragon.dat" --ref-lines 0.37512486082128127 --ref-nonline 0.1000350974915225 --ref-hit 90.11777957344
+RTP_Calculator simulate   "...\LaughingDragon.dat" --spins 5000000
+```
+
+- An `.agm` file can be passed instead of a `.dat`. The tool compiles it to a temporary `.dat` with `AgtCompiler.Core`.
+- Total work for Laughing Dragon is about 90 CPU-minutes for the line part and about 8 for the non-line part. On a 16-thread machine, expect roughly 10 minutes.
+- To split the work across processes or machines, use `--only lines|nonline`, `--shard k/n` and `--subshard j/m`. Each run prints a `PARTIAL ...` line. Add up the `raw`/`win`/`trigger` values across all parts; `mass` should total 1. The results above were produced this way.
+
+## What this proof of concept shows
+
+The `profile` command measures how large a brute-force enumeration of a single spin would be:
+
+| Layout | Draws per spin | log10(branches per spin) |
+|---|---|---|
+| base | ~7 | 11.3 average, 14.1 max |
+| luckyBreak (LBF) | ~77, including 60 draws of range 485 | 98 average, 126 max |
+
+That leads to four conclusions:
+
+- **Using the engine as the evaluator works.** The numbers match the PAR sheet exactly, and none of the engine's rules had to be re-implemented.
+- **Brute force alone won't work for real games.** The tool needs splits that reduce each reel's stops to a small statistic of what they show, like the line and scatter splits here. Each split must be checked by the self-test.
+- **Features need a state-based model** (Markov chain) rather than per-spin brute force. The 60 × 485 draws in LBF are probably cells re-rolled every spin, where only the cells inside rings matter. The next step is to identify the feature state (rings, positions, free spins left, held prizes) and enumerate transitions between states. That likely needs a split that exploits that "only cells inside rings pay".
+- **Engine suggestion.** A lightweight checkpoint/restore of game-level state, instead of `AGTReelGame.Assign`, which deep-copies every layout in about 10 ms, would make exact enumeration of state-changing spins far cheaper.
+
+## Limitations
+
+- Only the base game is covered. Feature RTP is still to do.
+- The base reel strips must be fixed. Games that switch reel sets (ReelGroupSet or random symbol-set groups) are rejected with a clear message.
+- Trigger detection by pay condition applies when a feature strategy is keyed by a base pay condition. Otherwise the tool falls back to restoring the snapshot after every triggering spin, which is exact but slower.
+- Results are double precision with compensated summation, accurate to about 1e-15 here.
+
+## Files
+
+| File | Purpose |
+|---|---|
+| `Engine/ScriptedRandomAgent.cs` | Random/scripted RNG with a draw trace |
+| `Engine/GameHost.cs` | Engine instance, snapshot/restore, win accounting, feature-entry suppression |
+| `Enumeration/DrawPartition.cs` | Weighted-table cells per draw range |
+| `Enumeration/ActEnumerator.cs` | Exact depth-first enumeration of one spin |
+| `Enumeration/GroupedProductEnumerator.cs` | Parallel enumeration over grouped reel stops, plus sharding |
+| `Analysis/BaseSetup.cs`, `ReelModel.cs` | Reel/line/scatter model read from the engine; stop grouping |
+| `Analysis/BaseGameExact.cs` | The base-game split |
+| `Analysis/SelfTest.cs` | Assumption checks A–G |
+| `Analysis/MonteCarlo.cs`, `DrawProfiler.cs` | Simulation cross-check and feasibility profile |
