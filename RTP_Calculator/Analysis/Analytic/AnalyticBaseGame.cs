@@ -40,6 +40,7 @@ public sealed class AnalyticBaseGame
         public ulong TotalBet { get; set; }
         public string Mystery { get; set; } = "";
         public int Scenarios { get; set; }
+        public string ReelGroupSets { get; set; } = "none";
         public int LinePayConditions { get; set; }
         public int BetLines { get; set; }
         public int DistinctLineModels { get; set; }
@@ -100,6 +101,7 @@ public sealed class AnalyticBaseGame
         var partition = new DrawPartition(host.Game);
 
         // ---- Scenarios: every outcome of the draws made while preparing the spin ------------------
+        CheckReelGroupSets(layout, report);
         var scenarios = DiscoverScenarios(host, partition);
         report.Scenarios = scenarios.Count;
 
@@ -165,6 +167,27 @@ public sealed class AnalyticBaseGame
             }
         }
         return report;
+    }
+
+    /// <summary>
+    /// Each enabled ReelGroupSet enables one and only one of its groups per spin. Its weights must cover the
+    /// whole draw range: a draw past the total weight enables nothing, so the previous spin's reels stay
+    /// active and spins are no longer independent.
+    /// </summary>
+    private static void CheckReelGroupSets(AGTLayout layout, Report report)
+    {
+        var parts = new List<string>();
+        foreach (var entry in layout.ReelGroupSets)
+        {
+            var set = entry.Value;
+            if (!set.Enabled || set.ReelGroups.Count <= 1) continue;
+            ulong sum = 0; foreach (var g in set.ReelGroups) sum += g.Value;
+            if (sum != set.ProbabilityRange)
+                throw new NotSupportedException($"ReelGroupSet '{entry.Key}' weights sum to {sum} but it draws from {set.ProbabilityRange}: " +
+                    "a draw past the total keeps the previous spin's reel groups, so spins are not independent.");
+            parts.Add($"{entry.Key}: {set.ReelGroups.Count} groups");
+        }
+        report.ReelGroupSets = parts.Count == 0 ? "none" : string.Join("; ", parts);
     }
 
     private static void Combine(Report report, List<Scenario> scenarios)

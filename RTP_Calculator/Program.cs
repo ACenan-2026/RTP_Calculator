@@ -158,7 +158,8 @@ A .agm input is compiled to a temporary .dat with the AGT compiler; the .agm is 
             var sw = Stopwatch.StartNew();
             var r = new Analysis.Analytic.AnalyticBaseGame(dat, o.Bet, o.Lines) { VerifySamples = o.Samples }.Run(verify: o.Samples > 0);
             Console.WriteLine($"  Mystery construct    : {r.Mystery}");
-            Console.WriteLine($"  Spin scenarios       : {r.Scenarios} (reel-group / preparation draws)");
+            Console.WriteLine($"  Reel group sets      : {r.ReelGroupSets}");
+            Console.WriteLine($"  Spin scenarios       : {r.Scenarios} (outcomes of the draws made while preparing the spin)");
             Console.WriteLine($"  Non-line method      : {r.NonLineMethod}");
             Console.WriteLine($"  Lines                : {r.BetLines} bet lines, {r.LinePayConditions} line pay conditions, {r.DistinctLineModels} distinct line models");
             Console.WriteLine($"                         {r.TuplesVisited:N0} symbol tuples, {r.PayEvaluations:N0} engine pay evaluations, {r.LineTime.TotalSeconds:F2} s");

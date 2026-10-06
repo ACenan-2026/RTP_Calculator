@@ -54,7 +54,8 @@ RTP_Calculator analytic "...\LaughingDragon.dat" --lines 50 --samples 200 --ref-
 | Run | Analytic and verified | Not supported | Verify failed |
 |---|---|---|---|
 | First analytic version | 30 | 58 | 18 |
-| Current | **41** | 65 | **0** |
+| After the replacement work | 41 | 65 | 0 |
+| Current (ReelGroupSet outcomes) | **43** | 63 | **0** |
 
 All 107 distinct games were run; CoinKingdomAztec timed out in the sandbox and is included under "Not supported".
 
@@ -62,7 +63,7 @@ What changed between the two runs:
 
 - **Replacement catalog.** For every replacement, the tool works out its inputs, outputs and target cells, then which symbols can reach each cell (fixed point). A replacement only blocks the line evaluator if it can actually change a payline symbol. This turned silent errors into clear "not supported" messages: some games had passed a weak 20-sample check with wrong line RTPs.
 - **Replacement pipeline per cell.** Coordinate (mystery) replacements now handle several of them at once, with or without `ReplaceInReel`. The tool also handles fixed and random-per-cell replacements, and detects "always true" triggers built from a hidden reel that always shows `win`.
-- **Spin-preparation scenarios.** ReelGroupSet and other draws made while preparing the spin are enumerated and mixed by weight.
+- **Spin-preparation scenarios.** ReelGroupSet and other draws made while preparing the spin are enumerated and mixed by weight. Each enabled ReelGroupSet enables exactly one of its groups (guide, slide 26; `AGTLayout.EvaluateReelGroupSwitch`). Its draw is therefore cut at the cumulative group weights, so the tool sees, for example, 5 outcomes instead of 200 draw values. If a set's weights don't add up to its draw range, the tool refuses: a draw past the total keeps the previous spin's reels. Example: RichCluckinEggs has 3 scenarios. The analytic paid-spin base is 0.39834 against 0.39712 ± 0.00146 simulated, and the hit rate is 1 in 74.56 against 74.42.
 - **General non-line evaluator.** When the scatter-count model doesn't apply, or disagrees with the engine, the tool groups stops by where "special" symbols land. It plays every group combination through the engine with exact in-spin enumeration. This fixed the TripleShot, SanFa, BlazinHot, EagleDollar and TripleForce games.
 - **Line multiplier symbols** follow the engine's own pay-line rules.
 - **Metamorphic tokens collected in the base game** are refused, because spins are not independent.
@@ -78,11 +79,10 @@ Remaining blockers, and what would fix each:
 
 | Games | Blocker | Next step |
 |---|---|---|
-| 16 | More than 64 reel-group scenarios (several ReelGroupSets multiply) | Per-reel strip mixtures. Independent group sets don't need joint scenarios for lines or scatter counts. |
+| 20 | Floating replacement changes payline symbols (`any` → F1–F4, coins, etc.; includes the Rings of Fortune and MegaLoot families) | Floating evaluator: work out each placement outcome separately |
 | 13 | Metamorphic tokens accumulate in base | Needs a state (Markov) model, the same work as features |
 | 12 | General non-line evaluator needs more than 20k configurations | Prune special symbols that never matter; parallelise; use the count model per symbol class |
-| 10 | Floating replacement changes payline symbols (`any` → F1–F4 and similar) | Floating evaluator: work out each placement outcome separately |
-| 4 | Mapped replacement changes payline symbols | Mapped evaluator |
+| 8 | Mapped replacement changes payline symbols (incl. Magnet Storm family) | Mapped evaluator |
 | 4 | Uniform draws over large ranges (random credit values) | Use the expected value directly |
 | 3 | In-spin branches over the coverage limit (20k) | Run `analytic` directly (5M limit) or add pruning |
 | 2 | Payline cells on a column with no reel | Investigate |

@@ -10,7 +10,7 @@ namespace RTP_Calculator.Enumeration;
 /// over a table with weights {60,25,10,4,1} has range 100 but only 5 distinct outcomes, so the
 /// enumerator needs to try 5 values (each weighted by its cell width), not 100.
 ///
-/// Cell boundaries are collected from every weighted symbol set in the game. Because several sets
+/// Cell boundaries are collected from every weighted symbol set and every ReelGroupSet in the game. Because several sets
 /// (or other consumers) can share the same range, the cells for a range are the union of all
 /// boundaries registered for it, which is a common refinement and therefore safe for every set
 /// with that range. Small ranges are always enumerated value-by-value because they are typically
@@ -43,6 +43,25 @@ public sealed class DrawPartition
             var layout = game.Layouts.Entry(l).Value;
             foreach (var set in layout.SymbolSets) Register(set.Value);
             foreach (var reel in layout.Reels) Register(reel.Value.Symbols);
+            foreach (var set in layout.ReelGroupSets) Register(set.Value);
+        }
+    }
+
+    /// <summary>
+    /// A ReelGroupSet draws once from [0, ProbabilityRange) and enables the first group whose cumulative
+    /// weight exceeds the draw (AGTLayout.EvaluateReelGroupSwitch), so its outcomes are cut at the
+    /// cumulative weights. A draw past the total weight (if the range is larger) is a cell of its own.
+    /// </summary>
+    private void Register(AgtEngine.Core.ReelGame.AGTReelGroupSet set)
+    {
+        uint range = set.ProbabilityRange;
+        if (range <= 1 || set.ReelGroups.Count <= 1) return;
+        if (!boundaries.TryGetValue(range, out var cuts)) boundaries[range] = cuts = new SortedSet<uint> { 0 };
+        uint sum = 0;
+        foreach (var group in set.ReelGroups)
+        {
+            sum = unchecked(sum + group.Value);
+            if (sum < range) cuts.Add(sum);
         }
     }
 
