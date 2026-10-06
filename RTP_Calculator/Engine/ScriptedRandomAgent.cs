@@ -15,13 +15,16 @@ namespace RTP_Calculator.Engine;
 /// </summary>
 public sealed class ScriptedRandomAgent : IRandomNumberAgent
 {
-    private readonly System.Random random;
+    private System.Random random;
     private uint[] prefixValues = new uint[64];
     private uint[] prefixRanges = new uint[64];
     private int prefixLength;
     private int position;
 
     public ScriptedRandomAgent(int seed) => random = new System.Random(seed);
+
+    /// <summary>Restart the internal random stream (used to give two engines identical draws).</summary>
+    public void Reseed(int seed) => random = new System.Random(seed);
 
     public bool Scripted { get; private set; }
     public bool RandomTail { get; private set; }

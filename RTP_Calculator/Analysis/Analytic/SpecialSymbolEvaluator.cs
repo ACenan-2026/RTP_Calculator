@@ -21,7 +21,7 @@ public sealed class SpecialSymbolEvaluator
     private readonly ActEnumerator enumerator;
     private readonly int baseIndex;
     private readonly List<Dictionary<string, int>> groupIndex = new List<Dictionary<string, int>>();
-    private readonly Func<int, string[], string> keyOf;
+    private readonly Func<int, uint, string> keyOf;
     private readonly Dictionary<string, (double win, double trigger)> results = new Dictionary<string, (double, double)>(StringComparer.Ordinal);
 
     public List<List<StopGroup>> Groups { get; }
@@ -32,18 +32,37 @@ public sealed class SpecialSymbolEvaluator
 
     public SpecialSymbolEvaluator(ReelModel model, HashSet<string> special, HashSet<int> fullReels, GameHost host,
         IReadOnlyList<uint> scenarioValues, IReadOnlyList<uint> scenarioRanges, long pathLimit, long configurationLimit)
+        : this(model, (r, p) => fullReels.Contains(r) ? string.Join("|", model.Reels[r].Windows[p])
+                                : string.Join("|", model.Reels[r].Windows[p].Select(s => special.Contains(s) ? s : ".")),
+               host, scenarioValues, scenarioRanges, pathLimit, configurationLimit) { }
+
+    /// <summary>General form: <paramref name="key"/>(reel, stop) groups stops that are equivalent for the non-line result.</summary>
+    public SpecialSymbolEvaluator(ReelModel model, Func<int, uint, string> key, GameHost host,
+        IReadOnlyList<uint> scenarioValues, IReadOnlyList<uint> scenarioRanges, long pathLimit, long configurationLimit)
     {
         this.model = model; this.host = host;
         baseIndex = host.BaseLayoutIndex;
         enumerator = new ActEnumerator(host, new DrawPartition(host.Game)) { PathLimitPerAct = pathLimit };
         enumerator.SetScenario(scenarioValues, scenarioRanges);
-        keyOf = (r, w) => fullReels.Contains(r) ? string.Join("|", w) : string.Join("|", w.Select(s => special.Contains(s) ? s : "."));
-        Groups = model.Reels.Select((reel, r) => StopGrouping.Group(reel, w => keyOf(r, w), w => 0)).ToList();
+        keyOf = key;
+        Groups = model.Reels.Select((reel, r) => GroupBy(reel, r)).ToList();
         foreach (var g in Groups) groupIndex.Add(g.Select((x, i) => (x.Key, i)).ToDictionary(t => t.Key, t => t.i, StringComparer.Ordinal));
         double configurations = Groups.Aggregate(1.0, (a, g) => a * g.Count);
         if (configurations > configurationLimit)
             throw new NotSupportedException($"Non-line part needs {configurations:N0} engine configurations (special-symbol groups {string.Join(" x ", Groups.Select(g => g.Count))}); limit {configurationLimit:N0}.");
         Configurations = (long)configurations;
+    }
+
+    private List<StopGroup> GroupBy(ReelInfo reel, int r)
+    {
+        var groups = new Dictionary<string, StopGroup>(StringComparer.Ordinal); var order = new List<string>();
+        for (uint p = 0; p < reel.Range; p++)
+        {
+            string k = keyOf(r, p);
+            if (groups.TryGetValue(k, out var g)) g.Count++;
+            else { groups[k] = new StopGroup(k, p, 1); order.Add(k); }
+        }
+        return order.Select(k => groups[k]).ToList();
     }
 
     public void Run()
@@ -87,7 +106,7 @@ public sealed class SpecialSymbolEvaluator
     public (double win, double trigger) Predict(uint[] stops)
     {
         var idx = new int[stops.Length];
-        for (int r = 0; r < stops.Length; r++) idx[r] = groupIndex[r][keyOf(r, model.Reels[r].Windows[stops[r]])];
+        for (int r = 0; r < stops.Length; r++) idx[r] = groupIndex[r][keyOf(r, stops[r])];
         return results[string.Join(",", idx)];
     }
 }

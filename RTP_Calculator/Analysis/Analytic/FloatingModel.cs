@@ -30,7 +30,7 @@ namespace RTP_Calculator.Analysis.Analytic;
 /// </summary>
 public sealed class FloatingModel
 {
-    public const string NeverSetName = "__rtp_never__";
+    public const string NeverSetName = EngineSurgery.NeverSetName;
 
     private sealed class Rule
     {
@@ -252,23 +252,8 @@ public sealed class FloatingModel
         try { oracle = GameHost.Load(dat, betPerLine, linesBet, 31, suppressFeatureEntry: true); }
         catch (NotSupportedException) { oracle = GameHost.Load(dat, betPerLine, linesBet, 31); }
         int baseIndex = oracle.BaseLayoutIndex;
-        // Switch off the handled replacements in the oracle (live game and snapshot).
-        oracle.Mutate(game =>
-        {
-            var layout = game.Layouts.Entry(baseIndex).Value;
-            if (!layout.SymbolSets.Contains(NeverSetName))
-            {
-                var never = new AGTSymbolSet(1); never[0u].Name.Assign(NeverSetName);
-                layout.SymbolSets.Add(NeverSetName, never);
-            }
-            foreach (var (trigger, index, mapped) in neutralise)
-            {
-                var array = layout.Replacements[trigger];
-                if (index < 0 || index >= array.Length) throw new InvalidOperationException("Could not locate a replacement in the oracle engine.");
-                if (mapped) array[index].ReplacementMappingSymbolsetName.Assign(NeverSetName);
-                else array[index].Original.Assign(NeverSetName);
-            }
-        });
+        // Switch off the handled replacements, and those that cannot reach a trigger cell, in the oracle.
+        EngineSurgery.SwitchOff(oracle, neutralise.Select(n => new EngineSurgery.ReplacementRef(n.trigger, n.index, n.mapped)));
         if (Environment.GetEnvironmentVariable("RTP_DEBUG") == "1")
         {
             Progress?.Invoke("oracle switches off: " + string.Join("; ", neutralise.Select(n => $"{n.trigger}[{n.index}]")));

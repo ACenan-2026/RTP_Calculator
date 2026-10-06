@@ -44,6 +44,8 @@ public sealed class AnalyticBaseGame
     private void Log(string message) { if (Verbose) Console.WriteLine($"    [{clock.Elapsed:mm\\:ss}] {message}"); }
     /// <summary>Random in-spin draws per check when exact enumeration of a spin is too large.</summary>
     public int SampledDraws { get; set; } = 2000;
+    /// <summary>Random spins used to check feature-entry detection against the real engine.</summary>
+    public int FeatureEntryChecks { get; set; } = 3000;
 
     public sealed class Report
     {
@@ -61,6 +63,7 @@ public sealed class AnalyticBaseGame
         public double TriggerProbability { get; set; }
         public string NonLineMethod { get; set; } = "";
         public string Floating { get; set; } = "none";
+        public string NonLineRelevance { get; set; } = "";
         /// <summary>Set when the non-line part could not be computed; line results are still exact.</summary>
         public string? NonLineError { get; set; }
         public bool LinesOnly => NonLineError is not null;
@@ -94,6 +97,8 @@ public sealed class AnalyticBaseGame
         public ScatterEvaluator? Count;
         public SpecialSymbolEvaluator? General;
         public FloatingModel Floating = null!;
+        public NonLineRelevance? Relevance;
+        public GameHost? NonLineHost;
         public string? NonLineError;
         public double LineWin, NonLineWin, Trigger;
         public (double win, double trigger) Predict(uint[] stops) => Count is not null ? Count.Predict(stops) : General!.Predict(stops);
@@ -209,6 +214,7 @@ public sealed class AnalyticBaseGame
         if (verify)
         {
             Log("verifying against the engine");
+            if (!report.LinesOnly) CheckFeatureEntryDetection(report, scenarios);
             Verify(report, host, scenarios, lineEval);
             // A count model that disagrees with the engine is replaced by the general evaluator.
             if (report.ScatterMismatches > 0 && scenarios.Any(s => s.Count is not null) && !report.LinesOnly)
@@ -265,11 +271,17 @@ public sealed class AnalyticBaseGame
     {
         var setup = sc.Setup;
         sc.Count = null; sc.General = null;
+        // Only cells/symbols that can influence non-line credits or feature entry matter; replacements that
+        // cannot write them are switched off in a dedicated engine instance (results unchanged, far fewer draws).
+        var layout = host.Game.Layouts.Entry(host.BaseLayoutIndex).Value;
+        sc.Relevance ??= NonLineRelevance.Build(host.Game, layout, host.LayoutName(host.BaseLayoutIndex), setup.Model, sc.Catalog);
+        report.NonLineRelevance = sc.Relevance.Description;
+        var nonLineHost = sc.NonLineHost ??= LoadNonLineHost(layout, sc.Relevance);
         if (preferCount && setup.ScatterSymbols.Count > 0)
         {
             try
             {
-                var count = new ScatterEvaluator(setup.Model, setup.ScatterSymbols, host, OraclePathLimit, setup.PrepareValues, setup.PrepareRanges);
+                var count = new ScatterEvaluator(setup.Model, setup.ScatterSymbols, nonLineHost, OraclePathLimit, setup.PrepareValues, setup.PrepareRanges);
                 count.Calibrate();
                 sc.Count = count;
                 sc.NonLineWin = count.ExpectedNonLineWin();
@@ -281,14 +293,27 @@ public sealed class AnalyticBaseGame
             }
             catch (NotSupportedException e) { report.Notes.Add("scatter-count model not used: " + e.Message); sc.Count = null; }
         }
-        var (special, fullReels) = SpecialSymbols(host.Game.Layouts.Entry(host.BaseLayoutIndex).Value, sc);
-        var general = new SpecialSymbolEvaluator(setup.Model, special, fullReels, host, setup.PrepareValues, setup.PrepareRanges, OraclePathLimit, ConfigurationLimit);
+        var model = setup.Model; var relevance = sc.Relevance;
+        var general = new SpecialSymbolEvaluator(model, (r, p) => relevance.Key(r, model.Reels[r].WindowSymbols[p]), nonLineHost,
+            setup.PrepareValues, setup.PrepareRanges, OraclePathLimit, ConfigurationLimit);
         general.Run();
         sc.General = general;
         sc.NonLineWin = general.ExpectedWin;
         sc.Trigger = general.TriggerProbability;
         report.OracleActs += general.Acts; report.OracleConfigurations += general.Configurations;
         report.T = Array.Empty<double>(); report.CountDistribution = Array.Empty<double>(); report.Prizes = new Dictionary<(int, int), double>();
+    }
+
+    /// <summary>Engine instance for the non-line evaluators, with irrelevant replacements switched off.</summary>
+    private GameHost LoadNonLineHost(AGTLayout layout, NonLineRelevance relevance)
+    {
+        GameHost h;
+        try { h = GameHost.Load(dat, betPerLine, lines, 51, suppressFeatureEntry: true); }
+        catch (NotSupportedException) { h = GameHost.Load(dat, betPerLine, lines, 51); }
+        var refs = relevance.Irrelevant.Select(e => new EngineSurgery.ReplacementRef(e.Info.Trigger,
+            Array.IndexOf(layout.Replacements[e.Info.Trigger], e.Replacement), e.Info.Kind == "mapped")).ToList();
+        EngineSurgery.SwitchOff(h, refs);
+        return h;
     }
 
     /// <summary>
@@ -344,6 +369,44 @@ public sealed class AnalyticBaseGame
             values.Add(partition.NextCellStart(setup.PrepareRanges[depth], setup.PrepareValues[depth])); ranges.Add(setup.PrepareRanges[depth]);
         }
         return result;
+    }
+
+    /// <summary>
+    /// Feature entry is detected from trigger pay conditions on engines whose feature strategies are switched
+    /// off. Check that against the real engine on random spins with identical draws.
+    /// </summary>
+    private void CheckFeatureEntryDetection(Report report, List<Scenario> scenarios)
+    {
+        var setup = scenarios[0].Setup;
+        GameHost suppressed;
+        try { suppressed = GameHost.Load(dat, betPerLine, lines, 61, suppressFeatureEntry: true); }
+        catch (NotSupportedException) { return; } // not used: triggers are read from the real engine
+        var real = GameHost.Load(dat, betPerLine, lines, 61);
+        var rng = new System.Random(VerifySeed + 1);
+        int n = FeatureEntryChecks, disagree = 0, entries = 0;
+        for (int i = 0; i < n; i++)
+        {
+            int seed = rng.Next();
+            var stops = setup.Ranges.Select(r => (uint)rng.Next((int)r)).ToArray();
+            bool[] results = new bool[2]; int k = 0;
+            foreach (var h in new[] { real, suppressed })
+            {
+                h.EnsureBase(); h.Agent.Reseed(seed);
+                h.Agent.BeginScripted(setup.PrepareValues, setup.PrepareRanges, setup.PrepareValues.Count, randomTail: true);
+                var req = h.Session.Prepare(betPerLine, lines);
+                if (req.Count != stops.Length) return; // scenario-dependent strips: skip this check
+                h.Session.Complete(stops);
+                results[k++] = h.FeatureEntrySuppressed ? h.FeatureEntryTriggered() : h.IsAwayFromBase;
+            }
+            if (results[0]) entries++;
+            if (results[0] != results[1]) disagree++;
+        }
+        report.Notes.Add($"feature-entry detection checked on {n:N0} random spins: {entries} entries, {disagree} disagreements");
+        if (disagree > 0)
+        {
+            foreach (var sc in scenarios) sc.NonLineError ??= $"feature-entry detection disagreed with the real engine on {disagree} of {n} spins";
+            Combine(report, scenarios);
+        }
     }
 
     private GameHost LoadSampler(GameHost fallback)

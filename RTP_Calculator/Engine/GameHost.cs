@@ -135,9 +135,13 @@ public sealed class GameHost
         {
             var strategy = entry.Value;
             if (!strategy.Enabled || strategy.Layout.CString == baseName) continue;
-            if (!payConditionNames.Contains(entry.Key) && lenient)
+            if (!payConditionNames.Contains(entry.Key))
             {
-                strategy.Enabled = false; FeatureEntryDetectionComplete = false; continue;
+                // Keyed by a pay condition of another layout (e.g. a feature's own trigger): it cannot fire while the
+                // base layout is played, unless the key is also a game-level trigger.
+                bool gameLevel = Game.Triggers.Any(t => t.Key == entry.Key) || Game.KeyWordTriggers.Any(t => t.Key == entry.Key);
+                if (!gameLevel) { strategy.Enabled = false; continue; }
+                if (lenient) { strategy.Enabled = false; FeatureEntryDetectionComplete = false; continue; }
             }
             if (!payConditionNames.Contains(entry.Key))
                 throw new NotSupportedException(

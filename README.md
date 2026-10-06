@@ -56,7 +56,8 @@ RTP_Calculator analytic "...\LaughingDragon.dat" --lines 50 --samples 200 --ref-
 | First analytic version | 30 | 58 | 18 |
 | After the replacement work | 41 | 65 | 0 |
 | After ReelGroupSet outcomes | 43 | 63 | 0 |
-| Current (floating replacements) | **51** + 8 lines-only | 47 | **0** |
+| After floating replacements | 51 + 8 lines-only | 47 | 0 |
+| Current (non-line relevance) | **58** + 14 lines-only | 34 | **0** |
 
 All 107 distinct games were run; CoinKingdomAztec timed out in the sandbox and is included under "Not supported".
 
@@ -97,20 +98,38 @@ When a trigger wins, the engine draws a replacement name N times. Each time the 
 | | RTP_Calculator (analytic) | Sheet (WinEngine simulation, 2.87 billion games) |
 |---|---|---|
 | Base line RTP | 0.277594 | 0.277611 |
+| Base non-line RTP | 0 | — (the sheet's base figure is lines only) |
+| Feature hit rate | 1 in 100 (exact) | 1 in 99.9995 |
 
-The difference is −1.7e-5. The sheet's own sampling error is about 1.6e-5 (scaled from a 300k-game run), so they agree. The calculation took about 30 s, with 3 reel-group scenarios and 16 driver configurations. 36 sampled engine checks agree. The sheet's H&S hit rate of 1 in 100 matches the hidden selector reel, which shows `yes` on 1 of its 100 stops. The tool doesn't compute that figure yet, because the non-line part isn't supported for this game.
+The line difference is −1.7e-5. The sheet's own sampling error is about 1.6e-5 (scaled from a 300k-game run), so they agree. The calculation took about 30 s, with 3 reel-group scenarios and 16 driver configurations. 36 sampled engine checks agree. The tool now computes the hit rate exactly: the hidden selector reel shows `yes` on 1 of its 100 stops, and that is the only thing that can trigger the feature in the base game.
+
+### Non-line relevance (`NonLineRelevance`)
+
+Before the non-line part is computed, the tool works out what can influence it, from the engine's loaded objects:
+
+1. **Starting conditions.** It starts from the non-line pay conditions that can pay (credit, dynamic pay, free games) or that a feature strategy is keyed on. It adds the conditions they depend on and the conditions that enable them. Conditions whose symbols can never appear where they look are dropped, such as client-only `noWin` display wins.
+2. **Relevant cells.** For those conditions, the cells they read (located) or every cell where their symbols can appear (scatter) become relevant, for those symbols only.
+3. **Replacement chains, followed backwards.** A replacement that can write a relevant cell makes its inputs, its trigger condition and its source cell relevant. This repeats until nothing changes.
+
+The non-line evaluators then group reel stops by relevant symbols in relevant cells only. They run on a separate engine instance in which every replacement that can't affect the non-line result is switched off. The result is unchanged, but the engine makes far fewer in-spin draws (no coin placements, line mysteries and so on).
+
+For Rings of Fortune, all 46–51 base replacements turn out to be irrelevant to the non-line result. That's because the base game's only non-line effect is feature entry, decided by the hidden `yes`/`miss` reel. So the non-line part goes from about 10^13 configurations to 2.
+
+**Feature-entry detection check.** Engines with feature strategies switched off detect entry from the trigger pay condition. Strategies keyed by another layout's pay condition can't fire from the base game, so they are simply switched off. Each verification compares this detection with the real engine on 3,000 random spins with identical draws; Cash Cave had 24 entries and 0 disagreements.
+
+**Newly fully analytic:** Cash Cave, Golden Phoenix, H&S RoF and its two test copies, Lagoon MegaLoot and FaCai Lightning. Games that previously failed on the non-line part now also get exact, verified line RTPs (lines-only).
 
 Remaining blockers, and what would fix each:
 
 | Games | Blocker | Next step |
 |---|---|---|
+| 14 lines-only | Non-line part depends on many symbols at once: hold-and-spin / cash-stack style coins with prize values (Cash Stacks ×3, Emperor/Norse, Thunder Cash, Rise of the Tiger, Moon Dancer, Last Dragon, Treasure Spirits…) | Count-and-prize model: per-class symbol counts (convolution) for triggers, plus per-cell expected prize values measured on engines where the prize replacement is limited to one probe cell |
 | 13 | Metamorphic tokens accumulate in base | Needs a state (Markov) model, the same work as features |
-| 12 + 8 lines-only | General non-line evaluator needs too many configurations (Rings of Fortune: ~10^13; Cash Stacks: 240k) | Prune special symbols that never matter; reuse the floating-model conditioning for coin and prize placements; count model per symbol class |
 | 10 | Mapped replacement changes payline symbols (Magnet Storm family, NewConcept2, …) | Mapped evaluator, same approach as floating |
 | 4 | Uniform draws over large ranges (random credit values) | Use the expected value directly |
-| 3 | In-spin branches over the coverage limit (20k) | Run `analytic` directly (5M limit) or add pruning |
 | 2 | Floating replacement triggered by visible scatters (DragonWaves, ZhongKui) | Condition on the scatter count |
 | 2 | Payline cells on a column with no reel | Investigate |
+| 1 + 1 | Chained mystery source (RocketFrenzyDiner); time limit in the sandbox (ReelHot7s, CoinKingdom) | Case by case |
 | 1 | Random-per-cell replacement with a conditional trigger | Condition on the trigger |
 | 1 | Time limit | Run outside the sandbox |
 
@@ -184,6 +203,7 @@ That leads to four conclusions:
 |---|---|
 | `Engine/ScriptedRandomAgent.cs` | Random/scripted RNG with a draw trace |
 | `Engine/GameHost.cs` | Engine instance, snapshot/restore, win accounting, feature-entry suppression |
+| `Engine/EngineSurgery.cs` | Switching replacements off in analysis-only engine instances |
 | `Enumeration/DrawPartition.cs` | Weighted-table cells per draw range |
 | `Enumeration/ActEnumerator.cs` | Exact depth-first enumeration of one spin |
 | `Enumeration/GroupedProductEnumerator.cs` | Parallel enumeration over grouped reel stops, plus sharding |
@@ -191,6 +211,6 @@ That leads to four conclusions:
 | `Analysis/Exact/BaseGameExact.cs` | The base-game split (engine-driven exact mode) |
 | `Analysis/Exact/SelfTest.cs` | Assumption checks A–G for exact mode |
 | `Analysis/MonteCarlo.cs`, `DrawProfiler.cs` | Simulation cross-check and feasibility profile |
-| `Analysis/Analytic/*.cs` | Analytic (reel-design) evaluators: `ReplacementCatalog`, `MysteryModel` (per-cell replacement pipeline), `FloatingModel`, `LineEvaluator`, `ScatterEvaluator`, `SpecialSymbolEvaluator`, `AnalyticBaseGame` |
+| `Analysis/Analytic/*.cs` | Analytic (reel-design) evaluators: `ReplacementCatalog`, `MysteryModel` (per-cell replacement pipeline), `FloatingModel`, `NonLineRelevance`, `LineEvaluator`, `ScatterEvaluator`, `SpecialSymbolEvaluator`, `AnalyticBaseGame` |
 | `Analysis/Coverage/*.cs` | Construct scanner and folder coverage runner |
 | `Util/GameFiles.cs` | Loading `.dat` / compiling `.agm` |

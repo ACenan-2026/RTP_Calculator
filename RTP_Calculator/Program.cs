@@ -163,6 +163,7 @@ A .agm input is compiled to a temporary .dat with the AGT compiler; the .agm is 
             Console.WriteLine($"  Reel group sets      : {r.ReelGroupSets}");
             Console.WriteLine($"  Spin scenarios       : {r.Scenarios} (outcomes of the draws made while preparing the spin)");
             Console.WriteLine($"  Floating (lines)     : {r.Floating}");
+            if (r.NonLineRelevance.Length > 0) Console.WriteLine($"  Non-line relevance   : {r.NonLineRelevance}");
             Console.WriteLine($"  Non-line method      : {r.NonLineMethod}{(r.LinesOnly ? " - " + r.NonLineError : "")}");
             Console.WriteLine($"  Lines                : {r.BetLines} bet lines, {r.LinePayConditions} line pay conditions, {r.DistinctLineModels} distinct line models");
             Console.WriteLine($"                         {r.TuplesVisited:N0} symbol tuples, {r.PayEvaluations:N0} engine pay evaluations, {r.LineTime.TotalSeconds:F2} s");
