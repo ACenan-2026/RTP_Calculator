@@ -30,10 +30,12 @@ public sealed class ScatterEvaluator
     private readonly ActEnumerator enumerator;
     private readonly int baseIndex;
 
-    public ScatterEvaluator(ReelModel model, HashSet<string> scatterSymbols, GameHost host)
+    public ScatterEvaluator(ReelModel model, HashSet<string> scatterSymbols, GameHost host, long pathLimit = 5_000_000,
+        IReadOnlyList<uint>? scenarioValues = null, IReadOnlyList<uint>? scenarioRanges = null)
     {
         this.model = model; scatter = scatterSymbols; this.host = host;
-        enumerator = new ActEnumerator(host, new DrawPartition(host.Game));
+        enumerator = new ActEnumerator(host, new DrawPartition(host.Game)) { PathLimitPerAct = pathLimit };
+        if (scenarioValues is not null) enumerator.SetScenario(scenarioValues, scenarioRanges!);
         baseIndex = host.BaseLayoutIndex;
         // Per reel: mask -> (count, representative stop)
         Masks = model.Reels.Select(reel =>
@@ -158,11 +160,18 @@ public sealed class ScatterEvaluator
             if (a is null) { Notes.Add($"no single arrangement found for {k} scatters"); continue; }
             var ma = Measure(a);
             T[k] = ma.Trigger; S[k] = ma.Other;
-            var b = StopsForCount(k, backward);
-            if (b is not null && !b.SequenceEqual(a))
+            // The count model needs T and S to depend only on how many scatters land, not where:
+            // check several other arrangements of the same count.
+            var rng = new System.Random(97 + k);
+            var orders = new List<List<int>> { backward };
+            for (int extra = 0; extra < 4; extra++) orders.Add(forward.OrderBy(_ => rng.Next()).ToList());
+            var tried = new HashSet<string>(StringComparer.Ordinal) { string.Join(",", a) };
+            foreach (var order in orders)
             {
+                var b = StopsForCount(k, order);
+                if (b is null || !tried.Add(string.Join(",", b))) continue;
                 var mb = Measure(b);
-                if (Math.Abs(mb.Trigger - ma.Trigger) > 1e-12 || Math.Abs(mb.Other - ma.Other) > 1e-9)
+                if (Math.Abs(mb.Trigger - ma.Trigger) > 1e-12 || Math.Abs(mb.Other - ma.Other) > 1e-9 * Math.Max(1, Math.Abs(ma.Other)))
                     throw new NotSupportedException($"Trigger/scatter pay with {k} scatters depends on where they land (T {ma.Trigger} vs {mb.Trigger}); count model invalid.");
             }
             if (T[k] > 1e-12 && T[k] < 1 - 1e-12)

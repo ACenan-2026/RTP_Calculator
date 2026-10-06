@@ -21,6 +21,20 @@ public sealed class ActEnumerator
     private readonly List<uint> prefixValues = new List<uint>(128);
     private readonly List<uint> prefixRanges = new List<uint>(128);
     private IReadOnlyList<ManagedGameSession.DrawRequest>? expectedRequests;
+    private readonly List<uint> scenarioValues = new List<uint>();
+    private readonly List<uint> scenarioRanges = new List<uint>();
+
+    /// <summary>
+    /// Fix the first draws of every act (the draws made while preparing the spin, e.g. a ReelGroupSet
+    /// choosing which reel strips are active). They are replayed as given, never branched, and excluded
+    /// from the path weight: results are conditional on that scenario.
+    /// </summary>
+    public void SetScenario(IReadOnlyList<uint> values, IReadOnlyList<uint> ranges)
+    {
+        scenarioValues.Clear(); scenarioValues.AddRange(values);
+        scenarioRanges.Clear(); scenarioRanges.AddRange(ranges);
+        expectedRequests = null;
+    }
 
     public ActEnumerator(GameHost host, DrawPartition partition)
     {
@@ -51,6 +65,8 @@ public sealed class ActEnumerator
     public double Enumerate(uint[] requestValues, Action<GameHost, ActResult, double> measure)
     {
         prefixValues.Clear(); prefixRanges.Clear();
+        prefixValues.AddRange(scenarioValues); prefixRanges.AddRange(scenarioRanges);
+        int fixedDraws = scenarioValues.Count;
         double mass = 0;
         long pathsThisAct = 0;
         while (true)
@@ -67,24 +83,24 @@ public sealed class ActEnumerator
             var ranges = host.Agent.Ranges;
             var values = host.Agent.Values;
             double weight = 1.0;
-            for (int d = 0; d < ranges.Count; d++)
+            for (int d = fixedDraws; d < ranges.Count; d++)
                 weight *= (double)(partition.NextCellStart(ranges[d], values[d]) - values[d]) / ranges[d];
 
             measure(host, result, weight);
             mass += weight;
             Paths++; pathsThisAct++;
             if (pathsThisAct > PathLimitPerAct)
-                throw new InvalidOperationException($"More than {PathLimitPerAct:N0} internal branches for one act; aborting.");
+                throw new NotSupportedException($"More than {PathLimitPerAct:N0} internal random branches in one spin; too many to enumerate exactly.");
 
             // Advance the odometer: deepest draw that still has another cell.
             int depth = ranges.Count - 1;
-            while (depth >= 0)
+            while (depth >= fixedDraws)
             {
                 uint next = partition.NextCellStart(ranges[depth], values[depth]);
                 if (next < ranges[depth]) break;
                 depth--;
             }
-            if (depth < 0) break;
+            if (depth < fixedDraws) break;
             prefixValues.Clear(); prefixRanges.Clear();
             for (int d = 0; d < depth; d++) { prefixValues.Add(values[d]); prefixRanges.Add(ranges[d]); }
             prefixValues.Add(partition.NextCellStart(ranges[depth], values[depth]));
@@ -105,7 +121,7 @@ public sealed class ActEnumerator
             bool same = requests.Count == expectedRequests.Count;
             for (int i = 0; same && i < requests.Count; i++)
                 same = requests[i].Range == expectedRequests[i].Range && requests[i].ReelIndex == expectedRequests[i].ReelIndex;
-            if (!same) throw new InvalidOperationException(
+            if (!same) throw new NotSupportedException(
                 "The reel-stop requests changed between acts (reel strips are switching). This proof of concept " +
                 "assumes the base game's reel strips are fixed.");
         }

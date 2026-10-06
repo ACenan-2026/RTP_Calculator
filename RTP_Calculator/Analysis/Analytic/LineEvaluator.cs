@@ -19,7 +19,7 @@ namespace RTP_Calculator.Analysis.Analytic;
 public sealed class LineEvaluator
 {
     private readonly AGTLayout layout;
-    private readonly List<(AGTPayCondition pc, ulong amount)> payConditions = new List<(AGTPayCondition, ulong)>();
+    private readonly List<(AGTPayCondition pc, ulong betMultiplier)> payConditions = new List<(AGTPayCondition, ulong)>();
     private readonly Dictionary<string, int> symbolIds = new Dictionary<string, int>(StringComparer.Ordinal);
     private readonly Dictionary<ulong, ulong> payMemo = new Dictionary<ulong, ulong>();
     private readonly AGTSymbolSet emptyMultipliers = new AGTSymbolSet();
@@ -39,15 +39,19 @@ public sealed class LineEvaluator
             if (pc.Scatter || pc.Located || pc.CombinedWin || pc.IsPatternPayC || !pc.Enabled) continue;
             if (pc.Statistics.DynamicPay || pc.QueuedDynamicPay || pc.AwardEndOfFreeGames)
                 throw new NotSupportedException($"Line pay condition '{entry.Key}' uses dynamic/queued/deferred pay; not supported analytically.");
+            if (!pc.Statistics.Pool.IsEmpty)
+                throw new NotSupportedException($"Line pay condition '{entry.Key}' pays from a random credit pool; not supported analytically.");
             if (pc.Dependency.DependentNames.Length > 0)
                 throw new NotSupportedException($"Line pay condition '{entry.Key}' depends on '{string.Join(",", pc.Dependency.DependentNames)}'; not supported analytically.");
             layout.Credits.ResolveCreditWeight(pc.Statistics, 1);
             ulong multiplier = pc.Statistics.Scaled ? linesBet : 1UL;
             if (!pc.Statistics.IgnoreBetPerLine) multiplier *= betPerLine;
-            payConditions.Add((pc, pc.Statistics.NominalCreditWeight * multiplier));
+            payConditions.Add((pc, multiplier));
         }
-        if (payConditions.Count == 0) throw new NotSupportedException("No line pay conditions found.");
+        multipliers = layout.MultiplierSymbols;
     }
+
+    private readonly AGTSymbolSet multipliers;
 
     /// <summary>All symbols that can take part in a line win (for checking that other replacements are irrelevant).</summary>
     public bool TouchesLines(AGTSymbol symbol)
@@ -89,31 +93,37 @@ public sealed class LineEvaluator
         // A fresh set per tuple, like a pay line's symbol set refreshed for each evaluation.
         var line = new AGTSymbolSet((uint)tuple.Count);
         for (int i = 0; i < tuple.Count; i++) line[(uint)i].Assign(tuple[i]);
-        ulong best = 0; uint bestNominal = 0;
-        foreach (var (pc, amount) in payConditions)
+        ulong best = 0; uint bestNominal = 0; bool any = false;
+        bool hasMultipliers = multipliers.NumSymbols() > 0;
+        foreach (var (pc, betMultiplier) in payConditions)
         {
-            uint nominal = pc.Statistics.NominalCreditWeight;
-            if (nominal <= bestNominal && best > 0) continue; // cannot beat the current winner
+            // Same order and rules as AGTLayout.PostProcessStandardPayLine: without multiplier symbols a
+            // condition that cannot beat the current winner is skipped; with them every condition is tried.
+            if (!hasMultipliers && any && bestNominal > pc.Statistics.NominalCreditWeight) continue;
             multiplierBuffer[0] = 1;
-            if (line.ContainsSymbolSet(pc.Symbols, matchBuffer, pc.MatchLocation, pc.MatchDistribution, pc.MatchOrder, null, emptyMultipliers, multiplierBuffer))
-            {
-                bestNominal = nominal; best = amount;
-            }
+            if (!line.ContainsSymbolSet(pc.Symbols, matchBuffer, pc.MatchLocation, pc.MatchDistribution, pc.MatchOrder, null, multipliers, multiplierBuffer))
+                continue;
+            layout.Credits.ResolveCreditWeight(pc.Statistics, multiplierBuffer[0]);
+            uint nominal = pc.Statistics.NominalCreditWeight;
+            if (!any || nominal > bestNominal) { any = true; bestNominal = nominal; best = nominal * betMultiplier; }
         }
+        // Leave the credit weights as resolved without multipliers for the next tuple.
+        if (hasMultipliers) foreach (var (pc, _) in payConditions) layout.Credits.ResolveCreditWeight(pc.Statistics, 1);
         return best;
     }
 
     /// <summary>Per-reel distribution of the symbol in one cell: (probability, symbol) pairs.</summary>
     public static List<(double p, AGTSymbol s)> CellDistribution(ReelInfo reel, int reelIndex, int window, MysteryModel mystery, MysteryModel.Outcome outcome)
     {
-        var map = new Dictionary<string, (long count, AGTSymbol symbol)>(StringComparer.Ordinal);
+        var map = new Dictionary<string, (double p, AGTSymbol symbol)>(StringComparer.Ordinal);
+        double unit = 1.0 / reel.Range;
         for (uint p = 0; p < reel.Range; p++)
-        {
-            var s = mystery.Effective(reelIndex, reel.WindowSymbols[p][window], outcome);
-            string name = s.Name.CString;
-            map[name] = map.TryGetValue(name, out var c) ? (c.count + 1, c.symbol) : (1, s);
-        }
-        return map.Values.Select(v => ((double)v.count / reel.Range, v.symbol)).OrderBy(v => v.symbol.Name.CString, StringComparer.Ordinal).ToList();
+            foreach (var (q, s) in mystery.Effective(reelIndex, window, reel.WindowSymbols[p][window], outcome))
+            {
+                string name = s.Name.CString;
+                map[name] = map.TryGetValue(name, out var c) ? (c.p + unit * q, c.symbol) : (unit * q, s);
+            }
+        return map.Values.Select(v => (v.p, v.symbol)).OrderBy(v => v.symbol.Name.CString, StringComparer.Ordinal).ToList();
     }
 
     /// <summary>Expected win on one line for fixed per-cell distributions (cells in line order).</summary>

@@ -15,6 +15,9 @@ Usage:
   RTP_Calculator <command> <game.dat | game.agm> [options]
 
 Commands:
+  coverage     Run the construct scan and the analytic calculation over every .agm/.dat in a FOLDER
+               (given in place of the game file). Options: --scan-only, --out file.csv,
+               --filter text, --range from:count, --samples N (default 100), --lines N.
   analytic     Base-game RTP from the reel design (seconds): line pays via the engine's matcher,
                scatter trigger / prizes via a few exact engine evaluations, then verification of
                the model against the full engine on random reel stops (--samples, default 200).
@@ -53,8 +56,9 @@ A .agm input is compiled to a temporary .dat with the AGT compiler; the .agm is 
             {
                 var options = Options.Parse(args.Skip(2));
                 string command = args[0].ToLowerInvariant();
-                byte[] dat = LoadDat(args[1]);
-                uint available = BaseLayoutPaylines(dat);
+                if (command == "coverage") return RunCoverage(args[1], options);
+                byte[] dat = GameFiles.Load(args[1]);
+                uint available = GameFiles.BaseLayoutPaylines(dat);
                 if (!options.LinesSpecified) options.UseDefaultLines(Math.Max(1, available));
                 else if (available > 0 && options.Lines > available)
                     throw new ArgumentException($"--lines {options.Lines} is more than the {available} paylines defined in the base layout.");
@@ -86,23 +90,23 @@ A .agm input is compiled to a temporary .dat with the AGT compiler; the .agm is 
             }
         }
 
-        /// <summary>Number of paylines defined in the layout the game starts in (0 for pattern / ways games).</summary>
-        private static uint BaseLayoutPaylines(byte[] dat)
+        private static int RunCoverage(string folder, Options o)
         {
-            var random = new AgtEngine.Core.Random.AGTRand(new Engine.ScriptedRandomAgent(1));
-            var game = new AgtEngine.Core.Game.AGTGameLoader(random, new AgtEngine.Core.Misc.VariableListContext()).CreateGameInstance(dat);
-            return (uint)game.CurrentLayout.PayLines.Count;
-        }
-
-        private static byte[] LoadDat(string path)
-        {
-            if (!File.Exists(path)) throw new FileNotFoundException("Game file not found.", path);
-            if (!path.EndsWith(".agm", StringComparison.OrdinalIgnoreCase)) return File.ReadAllBytes(path);
-            string output = Path.Combine(Path.GetTempPath(), "RTP_Calculator_" + Path.GetFileNameWithoutExtension(path) + "_" + Guid.NewGuid().ToString("N") + ".dat");
-            Console.WriteLine($"Compiling {Path.GetFileName(path)} with the AGT compiler...");
-            new AgtCompiler.Core.Compilation.AgmCompiler().CompileToDat(path, output, "RTP_Calculator");
-            try { return File.ReadAllBytes(output); }
-            finally { try { File.Delete(output); } catch (IOException) { } }
+            if (!Directory.Exists(folder)) throw new DirectoryNotFoundException($"Folder not found: {folder}");
+            Console.WriteLine($"=== Coverage: {folder} ===");
+            var runner = new Analysis.Coverage.CoverageRunner
+            {
+                VerifySamples = o.SamplesSpecified ? o.Samples : 100,
+                ScanOnly = o.ScanOnly, Bet = o.Bet, Lines = o.LinesSpecified ? o.Lines : (uint?)null,
+                Filter = o.Filter, Range = o.Range
+            };
+            string output = o.Out ?? Path.Combine(Directory.GetCurrentDirectory(), "coverage.csv");
+            runner.CsvPath = output;
+            var rows = runner.Run(folder);
+            Analysis.Coverage.CoverageRunner.WriteCsv(output, rows);
+            Analysis.Coverage.CoverageRunner.PrintSummary(rows);
+            Console.WriteLine($"  Written: {output}");
+            return 0;
         }
 
         private static void RunExact(byte[] dat, Options o)
@@ -154,6 +158,8 @@ A .agm input is compiled to a temporary .dat with the AGT compiler; the .agm is 
             var sw = Stopwatch.StartNew();
             var r = new Analysis.Analytic.AnalyticBaseGame(dat, o.Bet, o.Lines) { VerifySamples = o.Samples }.Run(verify: o.Samples > 0);
             Console.WriteLine($"  Mystery construct    : {r.Mystery}");
+            Console.WriteLine($"  Spin scenarios       : {r.Scenarios} (reel-group / preparation draws)");
+            Console.WriteLine($"  Non-line method      : {r.NonLineMethod}");
             Console.WriteLine($"  Lines                : {r.BetLines} bet lines, {r.LinePayConditions} line pay conditions, {r.DistinctLineModels} distinct line models");
             Console.WriteLine($"                         {r.TuplesVisited:N0} symbol tuples, {r.PayEvaluations:N0} engine pay evaluations, {r.LineTime.TotalSeconds:F2} s");
             Console.WriteLine($"  Scatter oracle       : {r.OracleConfigurations} configurations, {r.OracleActs:N0} engine acts, {r.ScatterTime.TotalSeconds:F2} s");
@@ -192,6 +198,7 @@ A .agm input is compiled to a temporary .dat with the AGT compiler; the .agm is 
             for (int i = 0; i < r.LayoutNames.Length; i++)
                 Console.WriteLine($"  {r.LayoutNames[i],-20} RTP {r.LayoutCredits[i] / r.Cost:F6}" + (i == 0 ? $"  +/- {r.BaseStdError:F6} (1 s.e.)" : ""));
             Console.WriteLine($"  {"Total",-20} RTP {r.Rtp:F6}  +/- {r.RtpStdError:F6} (1 s.e.)");
+            Console.WriteLine($"  Base, paid spin only RTP {r.SumBaseWin / r.Cost:F6}  +/- {r.BaseStdError:F6}   (base-layout credits from later acts: {r.BaseCreditsAfterPaidSpin / r.Cost:F6})");
             Console.WriteLine($"  Feature hit rate     1 in {(double)r.PaidGames / Math.Max(1, r.Triggers):F3}  ({r.Triggers:N0} triggers)");
             Console.WriteLine($"  {r.Acts:N0} acts in {r.Elapsed:hh\\:mm\\:ss} ({r.Acts / Math.Max(1e-9, r.Elapsed.TotalSeconds):N0} acts/s)");
             Console.WriteLine();

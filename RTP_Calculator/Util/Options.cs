@@ -12,6 +12,7 @@ public sealed class Options
     public int Threads { get; private set; } = Environment.ProcessorCount;
     public long? Spins { get; private set; }
     public int Samples { get; private set; } = 200;
+    public bool SamplesSpecified { get; private set; }
     public bool AlwaysRestore { get; private set; }
     public bool PerLine { get; private set; }
     public double? RefLines { get; private set; }
@@ -22,6 +23,10 @@ public sealed class Options
     public string Only { get; private set; } = "";
     public int SubShardIndex { get; private set; }
     public int SubShardCount { get; private set; } = 1;
+    public bool ScanOnly { get; private set; }
+    public string? Out { get; private set; }
+    public string? Filter { get; private set; }
+    public (int from, int count)? Range { get; private set; }
 
     public static Options Parse(IEnumerable<string> args)
     {
@@ -38,7 +43,7 @@ public sealed class Options
                 case "--bet": o.Bet = uint.Parse(Next(), CultureInfo.InvariantCulture); break;
                 case "--threads": o.Threads = Math.Max(1, int.Parse(Next(), CultureInfo.InvariantCulture)); break;
                 case "--spins": o.Spins = long.Parse(Next().Replace("_", "").Replace(",", ""), CultureInfo.InvariantCulture); break;
-                case "--samples": o.Samples = int.Parse(Next(), CultureInfo.InvariantCulture); break;
+                case "--samples": o.Samples = int.Parse(Next(), CultureInfo.InvariantCulture); o.SamplesSpecified = true; break;
                 case "--always-restore": o.AlwaysRestore = true; break;
                 case "--per-line": o.PerLine = true; break;
                 case "--ref-lines": o.RefLines = D(); break;
@@ -55,6 +60,13 @@ public sealed class Options
                     o.SubShardIndex = int.Parse(sub[0], CultureInfo.InvariantCulture);
                     o.SubShardCount = int.Parse(sub[1], CultureInfo.InvariantCulture);
                     if (o.SubShardCount < 1 || o.SubShardIndex < 0 || o.SubShardIndex >= o.SubShardCount) throw new ArgumentException("--subshard expects j/m with 0 <= j < m.");
+                    break;
+                case "--scan-only": o.ScanOnly = true; break;
+                case "--out": o.Out = Next(); break;
+                case "--filter": o.Filter = Next(); break;
+                case "--range":
+                    var rg = Next().Split(':');
+                    o.Range = (int.Parse(rg[0], CultureInfo.InvariantCulture), int.Parse(rg[1], CultureInfo.InvariantCulture));
                     break;
                 case "--only":
                     o.Only = Next().ToLowerInvariant();

@@ -16,12 +16,24 @@ public sealed class BaseSetup
     public HashSet<string> ScatterSymbols { get; private set; } = new HashSet<string>(StringComparer.Ordinal);
     public uint[] Ranges { get; private set; } = Array.Empty<uint>();
 
-    public static BaseSetup Read(GameHost host)
+    /// <summary>Draws made while preparing the spin for this setup (fixed for a scenario).</summary>
+    public List<uint> PrepareValues { get; } = new List<uint>();
+    public List<uint> PrepareRanges { get; } = new List<uint>();
+
+    public static BaseSetup Read(GameHost host) => Read(host, null, null);
+
+    /// <summary>
+    /// Read the base game as prepared by the engine. With <paramref name="prepareValues"/> the draws made
+    /// during Prepare (e.g. ReelGroupSet choices) are scripted, so a specific reel-strip scenario is read.
+    /// </summary>
+    public static BaseSetup Read(GameHost host, List<uint>? prepareValues, List<uint>? prepareRanges)
     {
         var setup = new BaseSetup();
         host.EnsureBase(force: true);
-        host.Agent.BeginRandom();
+        if (prepareValues is null) host.Agent.BeginRandom();
+        else host.Agent.BeginScripted(prepareValues, prepareRanges!, prepareValues.Count);
         var requests = host.Session.Prepare(host.BetPerLine, host.Lines);
+        if (prepareValues is not null) { setup.PrepareValues.AddRange(host.Agent.Values); setup.PrepareRanges.AddRange(host.Agent.Ranges); }
         var layout = host.Game.CurrentLayout;
         setup.Model = ReelModel.Read(host, requests);
         for (int i = 0; i < layout.PayLines.Count; i++)

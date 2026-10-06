@@ -47,6 +47,48 @@ Whenever a model assumption is not met, the analytic mode stops with "not suppor
 RTP_Calculator analytic "...\LaughingDragon.dat" --lines 50 --samples 200 --ref-lines 0.37512486082128127 --ref-nonline 0.1000350974915225 --ref-hit 90.11777957344
 ```
 
+## Coverage across the game library (`coverage`)
+
+`RTP_Calculator coverage <folder>` runs the construct scan and the analytic calculation on every `.agm`/`.dat` in a folder (byte-identical files once), verifies each result against the full engine on random reel stops, and writes a CSV. The latest run on `CopyInto` is in `coverage_CopyInto.csv`.
+
+| Run | Analytic and verified | Not supported | Verify failed |
+|---|---|---|---|
+| First analytic version | 30 | 58 | 18 |
+| Current | **41** | 65 | **0** |
+
+All 107 distinct games were run; CoinKingdomAztec timed out in the sandbox and is included under "Not supported".
+
+What changed between the two runs:
+
+- **Replacement catalog.** For every replacement, the tool works out its inputs, outputs and target cells, then which symbols can reach each cell (fixed point). A replacement only blocks the line evaluator if it can actually change a payline symbol. This turned silent errors into clear "not supported" messages: some games had passed a weak 20-sample check with wrong line RTPs.
+- **Replacement pipeline per cell.** Coordinate (mystery) replacements now handle several of them at once, with or without `ReplaceInReel`. The tool also handles fixed and random-per-cell replacements, and detects "always true" triggers built from a hidden reel that always shows `win`.
+- **Spin-preparation scenarios.** ReelGroupSet and other draws made while preparing the spin are enumerated and mixed by weight.
+- **General non-line evaluator.** When the scatter-count model doesn't apply, or disagrees with the engine, the tool groups stops by where "special" symbols land. It plays every group combination through the engine with exact in-spin enumeration. This fixed the TripleShot, SanFa, BlazinHot, EagleDollar and TripleForce games.
+- **Line multiplier symbols** follow the engine's own pay-line rules.
+- **Metamorphic tokens collected in the base game** are refused, because spins are not independent.
+- **Stronger verification.** The default is 100 samples, and a third of the samples put replacement inputs on the line being checked.
+
+**Note on the emulator's "base" figure.** The engine books some credits to the base layout during or after a feature. The analytic figure is the paid spin only. The `simulate` command now prints both. For example, VegasFiestaGrand gives:
+
+- **Analytic:** 0.24513.
+- **Simulated paid spin only:** 0.24582 ± 0.00113.
+- **Simulated base layout total:** 0.24942. The extra 0.0036 is booked to the base layout during features.
+
+Remaining blockers, and what would fix each:
+
+| Games | Blocker | Next step |
+|---|---|---|
+| 16 | More than 64 reel-group scenarios (several ReelGroupSets multiply) | Per-reel strip mixtures. Independent group sets don't need joint scenarios for lines or scatter counts. |
+| 13 | Metamorphic tokens accumulate in base | Needs a state (Markov) model, the same work as features |
+| 12 | General non-line evaluator needs more than 20k configurations | Prune special symbols that never matter; parallelise; use the count model per symbol class |
+| 10 | Floating replacement changes payline symbols (`any` → F1–F4 and similar) | Floating evaluator: work out each placement outcome separately |
+| 4 | Mapped replacement changes payline symbols | Mapped evaluator |
+| 4 | Uniform draws over large ranges (random credit values) | Use the expected value directly |
+| 3 | In-spin branches over the coverage limit (20k) | Run `analytic` directly (5M limit) or add pruning |
+| 2 | Payline cells on a column with no reel | Investigate |
+| 1 | Random-per-cell replacement with a conditional trigger | Condition on the trigger |
+| 1 | Time limit | Run outside the sandbox |
+
 ## How it works (engine-driven exact mode)
 
 1. **Hook the RNG.** Every random number the engine uses goes through `IRandomNumberAgent`. `ScriptedRandomAgent` replaces it: it replays a set sequence of values and records the range of every draw.
@@ -124,4 +166,6 @@ That leads to four conclusions:
 | `Analysis/Exact/BaseGameExact.cs` | The base-game split (engine-driven exact mode) |
 | `Analysis/Exact/SelfTest.cs` | Assumption checks A–G for exact mode |
 | `Analysis/MonteCarlo.cs`, `DrawProfiler.cs` | Simulation cross-check and feasibility profile |
-| `Analysis/Analytic/*.cs` | Analytic (reel-design) evaluators and their verification |
+| `Analysis/Analytic/*.cs` | Analytic (reel-design) evaluators: `ReplacementCatalog`, `MysteryModel` (per-cell replacement pipeline), `LineEvaluator`, `ScatterEvaluator`, `SpecialSymbolEvaluator`, `AnalyticBaseGame` |
+| `Analysis/Coverage/*.cs` | Construct scanner and folder coverage runner |
+| `Util/GameFiles.cs` | Loading `.dat` / compiling `.agm` |

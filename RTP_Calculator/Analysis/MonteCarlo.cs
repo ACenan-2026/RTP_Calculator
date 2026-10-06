@@ -28,6 +28,8 @@ public sealed class MonteCarlo
         public double SumGameWin { get; set; }
         public double SumGameWinSquared { get; set; }
         public double SumBaseWin { get; set; }
+        /// <summary>Credits booked to the base layout by acts after the paid spin (during/after a feature).</summary>
+        public double BaseCreditsAfterPaidSpin { get; set; }
         public double SumBaseWinSquared { get; set; }
         public TimeSpan Elapsed { get; set; }
         public double Cost => (double)PaidGames * TotalBet;
@@ -67,7 +69,7 @@ public sealed class MonteCarlo
                 int n = host.LayoutCount, baseIndex = host.BaseLayoutIndex;
                 var credits = new double[n];
                 long games = perThread + (t < remainder ? 1 : 0), acts = 0, triggers = 0;
-                double s1 = 0, s2 = 0, b1 = 0, b2 = 0;
+                double s1 = 0, s2 = 0, b1 = 0, b2 = 0, later = 0;
                 for (long g = 0; g < games; g++)
                 {
                     double gameWin = 0;
@@ -80,6 +82,7 @@ public sealed class MonteCarlo
                     {
                         var r = host.PlayRandomAct(); acts++;
                         for (int i = 0; i < n; i++) { credits[i] += r.Credited[i]; gameWin += r.Credited[i]; }
+                        later += r.Credited[baseIndex];
                         if (++guard > 1_000_000) throw new InvalidOperationException("Feature did not terminate.");
                     }
                     s1 += gameWin; s2 += gameWin * gameWin; b1 += baseWin; b2 += baseWin * baseWin;
@@ -94,7 +97,7 @@ public sealed class MonteCarlo
                     }
                     for (int i = 0; i < n; i++) report.LayoutCredits[i] += credits[i];
                     report.PaidGames += games; report.Acts += acts; report.Triggers += triggers;
-                    report.SumGameWin += s1; report.SumGameWinSquared += s2; report.SumBaseWin += b1; report.SumBaseWinSquared += b2;
+                    report.SumGameWin += s1; report.SumGameWinSquared += s2; report.SumBaseWin += b1; report.SumBaseWinSquared += b2; report.BaseCreditsAfterPaidSpin += later;
                 }
             }
             catch (Exception e) { Interlocked.CompareExchange(ref failure, e, null); }
