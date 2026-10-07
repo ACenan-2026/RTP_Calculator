@@ -35,6 +35,14 @@ public sealed class AnalyticBaseGame
     public long OraclePathLimit { get; set; } = 5_000_000;
     /// <summary>Maximum engine configurations for the general non-line evaluator (per scenario).</summary>
     public long ConfigurationLimit { get; set; } = 20_000;
+    /// <summary>Engine configurations allowed for the class-count model (keyed combinations x count vectors).</summary>
+    public long ClassConfigurationLimit { get; set; } = 50_000;
+    /// <summary>Engine acts allowed for one class-count configuration (one spin with every in-spin draw).</summary>
+    public long ClassPathLimit { get; set; } = 200_000;
+    /// <summary>Worker threads for the class-count model (each runs its own engine).</summary>
+    public int Threads { get; set; } = 1;
+    /// <summary>Optional cache file for class-count engine measurements (resumes an interrupted run).</summary>
+    public string? CachePath { get; set; }
     public int ScenarioLimit { get; set; } = 64;
     /// <summary>Compute line wins only (the non-line part is reported as skipped).</summary>
     public bool SkipNonLine { get; set; }
@@ -83,6 +91,8 @@ public sealed class AnalyticBaseGame
         public int ScatterMismatches { get; set; }
         public List<string> MismatchExamples { get; } = new List<string>();
         public TimeSpan VerifyTime { get; set; }
+        /// <summary>Expected non-line credits per pay condition family (class-count model only).</summary>
+        public Dictionary<string, double> NonLineBreakdown { get; } = new Dictionary<string, double>(StringComparer.Ordinal);
         public double LineRtp => ExpectedLineWin / TotalBet;
         public double NonLineRtp => ExpectedNonLineWin / TotalBet;
     }
@@ -96,12 +106,13 @@ public sealed class AnalyticBaseGame
         public ReplacementCatalog Catalog = null!;
         public ScatterEvaluator? Count;
         public SpecialSymbolEvaluator? General;
+        public ClassCountEvaluator? Classes;
         public FloatingModel Floating = null!;
         public NonLineRelevance? Relevance;
         public GameHost? NonLineHost;
         public string? NonLineError;
         public double LineWin, NonLineWin, Trigger;
-        public (double win, double trigger) Predict(uint[] stops) => Count is not null ? Count.Predict(stops) : General!.Predict(stops);
+        public (double win, double trigger) Predict(uint[] stops) => Count is not null ? Count.Predict(stops) : Classes is not null ? Classes.Predict(stops) : General!.Predict(stops);
     }
 
     public Report Run(bool verify)
@@ -231,6 +242,7 @@ public sealed class AnalyticBaseGame
                 Combine(report, scenarios);
                 report.VerifiedLines = report.LineMismatches = report.VerifiedScatter = report.ScatterMismatches = 0;
                 report.MismatchExamples.Clear();
+                CheckTriggerRate(report, scenarios);
                 Verify(report, host, scenarios, lineEval);
             }
         }
@@ -264,13 +276,13 @@ public sealed class AnalyticBaseGame
         report.NonLineError = scenarios.Select(s => s.NonLineError).FirstOrDefault(e => e is not null);
         report.ExpectedNonLineWin = report.LinesOnly ? double.NaN : scenarios.Sum(s => s.Weight * s.NonLineWin);
         report.TriggerProbability = report.LinesOnly ? double.NaN : scenarios.Sum(s => s.Weight * s.Trigger);
-        report.NonLineMethod = report.LinesOnly ? "not supported" : string.Join(", ", scenarios.Select(s => s.Count is not null ? "scatter-count" : "general").Distinct());
+        report.NonLineMethod = report.LinesOnly ? "not supported" : string.Join(", ", scenarios.Select(s => s.Count is not null ? "scatter-count" : s.Classes is not null ? "class-count" : "general").Distinct());
     }
 
     private void ComputeNonLine(Scenario sc, GameHost host, Report report, bool preferCount)
     {
         var setup = sc.Setup;
-        sc.Count = null; sc.General = null;
+        sc.Count = null; sc.General = null; sc.Classes = null;
         // Only cells/symbols that can influence non-line credits or feature entry matter; replacements that
         // cannot write them are switched off in a dedicated engine instance (results unchanged, far fewer draws).
         var layout = host.Game.Layouts.Entry(host.BaseLayoutIndex).Value;
@@ -281,6 +293,7 @@ public sealed class AnalyticBaseGame
         {
             try
             {
+                Log("trying the scatter-count model");
                 var count = new ScatterEvaluator(setup.Model, setup.ScatterSymbols, nonLineHost, OraclePathLimit, setup.PrepareValues, setup.PrepareRanges);
                 count.Calibrate();
                 sc.Count = count;
@@ -291,11 +304,38 @@ public sealed class AnalyticBaseGame
                 foreach (var n in count.Notes) if (!report.Notes.Contains(n)) report.Notes.Add(n);
                 return;
             }
-            catch (NotSupportedException e) { report.Notes.Add("scatter-count model not used: " + e.Message); sc.Count = null; }
+            catch (NotSupportedException e) { report.Notes.Add("scatter-count model not used: " + e.Message); sc.Count = null; Log("scatter-count model not used"); }
         }
         var model = setup.Model; var relevance = sc.Relevance;
-        var general = new SpecialSymbolEvaluator(model, (r, p) => relevance.Key(r, model.Reels[r].WindowSymbols[p]), nonLineHost,
-            setup.PrepareValues, setup.PrepareRanges, OraclePathLimit, ConfigurationLimit);
+        SpecialSymbolEvaluator general;
+        try
+        {
+            general = new SpecialSymbolEvaluator(model, (r, p) => relevance.Key(r, model.Reels[r].WindowSymbols[p]), nonLineHost,
+                setup.PrepareValues, setup.PrepareRanges, OraclePathLimit, ConfigurationLimit);
+        }
+        catch (NotSupportedException generalError)
+        {
+            try
+            {
+                var classes = new ClassCountEvaluator(model, relevance, nonLineHost, setup.PrepareValues, setup.PrepareRanges, Math.Min(OraclePathLimit, ClassPathLimit), ClassConfigurationLimit);
+                Log("class-count model: " + classes.Description + $"; {classes.Configurations:N0} engine configurations");
+                classes.Progress = Log;
+                classes.Threads = Threads; classes.CachePath = CachePath;
+                classes.HostFactory = () => LoadNonLineHost(layout, relevance);
+                classes.Run();
+                sc.Classes = classes;
+                sc.NonLineWin = classes.ExpectedWin;
+                sc.Trigger = classes.TriggerProbability;
+                report.OracleActs += classes.Acts; report.OracleConfigurations += classes.Configurations;
+                foreach (var (f, v) in classes.Breakdown)
+                    report.NonLineBreakdown[f] = (report.NonLineBreakdown.TryGetValue(f, out var old) ? old : 0) + sc.Weight * v;
+                report.Notes.Add($"class-count model: {classes.Description}; {classes.InvarianceChecks} arrangement checks passed; " +
+                                     $"in-spin picks: {classes.FactorSummary}");
+                report.T = Array.Empty<double>(); report.CountDistribution = Array.Empty<double>(); report.Prizes = new Dictionary<(int, int), double>();
+                return;
+            }
+            catch (NotSupportedException e) { sc.Classes = null; throw new NotSupportedException(generalError.Message + " Class-count model: " + e.Message); }
+        }
         general.Run();
         sc.General = general;
         sc.NonLineWin = general.ExpectedWin;
@@ -402,10 +442,32 @@ public sealed class AnalyticBaseGame
             if (results[0] != results[1]) disagree++;
         }
         report.Notes.Add($"feature-entry detection checked on {n:N0} random spins: {entries} entries, {disagree} disagreements");
+        observedEntries = entries; observedSpins = n;
+        CheckTriggerRate(report, scenarios);
         if (disagree > 0)
         {
             foreach (var sc in scenarios) sc.NonLineError ??= $"feature-entry detection disagreed with the real engine on {disagree} of {n} spins";
             Combine(report, scenarios);
+        }
+    }
+
+    private int observedEntries, observedSpins;
+
+    /// <summary>
+    /// The feature-entry check's random spins also give an independent estimate of the trigger rate (for the
+    /// first preparation scenario); a model far outside it counts as a non-line mismatch.
+    /// </summary>
+    private void CheckTriggerRate(Report report, List<Scenario> scenarios)
+    {
+        var first = scenarios[0];
+        if (observedSpins == 0 || first.NonLineError is not null || double.IsNaN(first.Trigger)) return;
+        int n = observedSpins;
+        double observed = (double)observedEntries / n, p = Math.Max(first.Trigger, 1.0 / n);
+        double se = Math.Sqrt(p * (1 - p) / n);
+        if (Math.Abs(observed - first.Trigger) > 4.5 * se + 1.0 / n)
+        {
+            report.ScatterMismatches++;
+            report.MismatchExamples.Add($"trigger rate: model {first.Trigger:G6}, engine {observedEntries} in {n:N0} random spins ({observed:G4})");
         }
     }
 

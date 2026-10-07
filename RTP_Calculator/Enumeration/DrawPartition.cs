@@ -34,17 +34,54 @@ public sealed class DrawPartition
 
     public List<string> Warnings { get; } = new List<string>();
 
-    public DrawPartition(AGTReelGame game, uint alwaysFullUpTo = 64, uint maxUnregisteredRange = 100_000)
+    /// <summary>Initialiser template sets that were left out (see <c>skipInitialiserTemplates</c>).</summary>
+    public int SkippedTemplates { get; }
+
+    /// <param name="skipInitialiserTemplates">
+    /// Leave out symbol sets that only serve as initialiser templates (the source of a <c>MappingSymbolset</c> or
+    /// <c>REELSymbolset</c> line, e.g. one cash table per bet level). The engine copies the template's content into
+    /// the live set (AGTLayout.UpdateMappingSymbolset / AGTReel.SetReelSymbolSet), so draws use the live set, which
+    /// is still registered with the content for the current bet. Templates that a replacement names directly are
+    /// kept. This avoids splitting a draw at the cut points of every bet level's table.
+    /// </param>
+    public DrawPartition(AGTReelGame game, uint alwaysFullUpTo = 64, uint maxUnregisteredRange = 100_000, bool skipInitialiserTemplates = false)
     {
         AlwaysFullUpTo = alwaysFullUpTo;
         MaxUnregisteredRange = maxUnregisteredRange;
+        var skip = skipInitialiserTemplates ? InitialiserTemplates(game) : new HashSet<string>();
         for (int l = 0; l < game.Layouts.Count; l++)
         {
             var layout = game.Layouts.Entry(l).Value;
-            foreach (var set in layout.SymbolSets) Register(set.Value);
+            foreach (var set in layout.SymbolSets)
+            {
+                if (skip.Contains(set.Key)) { SkippedTemplates++; continue; }
+                Register(set.Value);
+            }
             foreach (var reel in layout.Reels) Register(reel.Value.Symbols);
             foreach (var set in layout.ReelGroupSets) Register(set.Value);
         }
+    }
+
+    private static HashSet<string> InitialiserTemplates(AGTReelGame game)
+    {
+        var templates = new HashSet<string>(StringComparer.Ordinal);
+        var live = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var b in game.InitialisationBlocks)
+        {
+            foreach (var v in b.Value.BetBasedSymbolsetMapping) { templates.Add(v.Value.AsString()); live.Add(v.Key); }
+            foreach (var v in b.Value.ReelSymbolsets) templates.Add(v.Value.AsString());
+        }
+        for (int l = 0; l < game.Layouts.Count; l++)
+        {
+            var layout = game.Layouts.Entry(l).Value;
+            foreach (var reel in layout.Reels) live.Add(reel.Value.CurrentSymbolSetName.CString);
+            foreach (var rpls in layout.Replacements)
+                foreach (var r in rpls.Value)
+                    foreach (var n in new[] { r.Original, r.Replacement, r.MappingSymbolsetName, r.ReplacementMappingSymbolsetName, r.NumberOfFloatingPicksRandomSymbolsetName, r.ReferenceSymbolSetName })
+                        if (!n.IsEmpty) live.Add(n.CString);
+        }
+        templates.ExceptWith(live);
+        return templates;
     }
 
     /// <summary>

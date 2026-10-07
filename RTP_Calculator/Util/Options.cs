@@ -27,6 +27,8 @@ public sealed class Options
     public bool LinesOnly { get; private set; }
     public int VerifySeed { get; private set; } = 4242;
     public string? Out { get; private set; }
+    /// <summary>Cache file for class-count engine measurements (analytic mode); lets a long run resume.</summary>
+    public string? Cache { get; private set; }
     public string? Filter { get; private set; }
     public (int from, int count)? Range { get; private set; }
 
@@ -67,6 +69,7 @@ public sealed class Options
                 case "--lines-only": o.LinesOnly = true; break;
                 case "--verify-seed": o.VerifySeed = int.Parse(Next(), CultureInfo.InvariantCulture); break;
                 case "--out": o.Out = Next(); break;
+                case "--cache": o.Cache = Next(); break;
                 case "--filter": o.Filter = Next(); break;
                 case "--range":
                     var rg = Next().Split(':');

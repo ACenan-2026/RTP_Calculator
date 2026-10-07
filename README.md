@@ -57,7 +57,8 @@ RTP_Calculator analytic "...\LaughingDragon.dat" --lines 50 --samples 200 --ref-
 | After the replacement work | 41 | 65 | 0 |
 | After ReelGroupSet outcomes | 43 | 63 | 0 |
 | After floating replacements | 51 + 8 lines-only | 47 | 0 |
-| Current (non-line relevance) | **58** + 14 lines-only | 34 | **0** |
+| After non-line relevance | 58 + 14 lines-only | 34 | 0 |
+| Current (class-count model, factorised picks) | **64** + 11 lines-only | 31 | **0** |
 
 All 107 distinct games were run; CoinKingdomAztec timed out in the sandbox and is included under "Not supported".
 
@@ -117,21 +118,58 @@ For Rings of Fortune, all 46–51 base replacements turn out to be irrelevant to
 
 **Feature-entry detection check.** Engines with feature strategies switched off detect entry from the trigger pay condition. Strategies keyed by another layout's pay condition can't fire from the base game, so they are simply switched off. Each verification compares this detection with the real engine on 3,000 random spins with identical draws; Cash Cave had 24 entries and 0 disagreements.
 
-**Newly fully analytic:** Cash Cave, Golden Phoenix, H&S RoF and its two test copies, Lagoon MegaLoot and FaCai Lightning. Games that previously failed on the non-line part now also get exact, verified line RTPs (lines-only).
+**Fully analytic after the relevance work:** Cash Cave, Golden Phoenix, H&S RoF and its two test copies, and Lagoon MegaLoot. Games that previously failed on the non-line part now also get exact, verified line RTPs (lines-only).
+
+### Coin and prize games (`ClassCountEvaluator`)
+
+In Cash Stacks style games the non-line result depends on *how many* of each relevant symbol land on a set of interchangeable reels, plus the exact content of a few other reels. The class-count model uses that:
+
+- **Count reels** are the visible reels whose cells all have the same relevant symbols (from `NonLineRelevance`). Each stop is reduced to a count vector (how many SCAT, MEGA, X … it shows) and the reels are combined exactly by convolution. Galaxy Gold: reels 1–4, classes MEGA/SCAT/X, 35 count vectors.
+- **Keyed reels** are all others (hidden selector reels, a reel with its own located condition such as reel 5's full wild stack). They are grouped by the relevance key as before. Galaxy Gold: 12 × 1 × 2 groups.
+- For every keyed combination and count vector, the real engine plays one arrangement with every in-spin draw (mystery symbols, coin values, bonus values). 100 other arrangements of the same counts (other reels, other window positions) are played as a check and must give identical results; otherwise the model is not used.
+- The breakdown by pay condition family is reported (e.g. `WinBonus_BN`, `WinCS`, `K3_FEAT_St`), so the figures can be lined up with a PAR sheet.
+
+**Repeated in-spin picks** (`ActEnumerator.Expect`). One spin can draw a value for every coin on screen, or a symbol for every mystery cell, so multiplying the draws out is too slow (9^5 coin values, and more when mystery symbols turn into coins). The enumerator now recognises runs of repeated picks and:
+
+- takes "which remaining cell gets the symbol" picks at their first outcome, after checking that changing one gives the same result (the cells are interchangeable);
+- merges pick outcomes that leave the same screen, result and later draws (e.g. two weight cells of the Low and High coin tables that give the same coin);
+- groups picks that act alike, and plays each *multiset* of outcomes once with its multinomial probability, instead of every ordering;
+- reuses the contribution of later picks when a run leaves the same later draws (e.g. coin values after bonus values), checked on random cases.
+
+Each assumption is checked on random cases in every run, and a run that fails is multiplied out in full (or the game is refused if that would be too large). On spot checks the factorised result equals the full enumeration to 1e-15 (e.g. 649.1841447916 credits for one Galaxy Gold screen, 858 engine plays instead of 34,714). The scatter-count oracle uses the same method.
+
+**Galaxy Gold against its PAR sheet** (`GalaxyGold_CashStacks_online_V96.xlsm`, B1 L50, cost 50):
+
+| | RTP_Calculator (analytic) | Sheet |
+|---|---|---|
+| Base line RTP | 0.241639065265 | 0.2416390652 |
+| Scatter pays (K3/K4/K5 FEAT) | 0.012115337883 | 0.0121153378 |
+| Bn bonus with full stack (Credit/Bonus), incl. Mini 0.014136554622 and Minor 0.012722899160 | 0.136435422795 | 0.1364354228 (Mini 0.0141365546, Minor 0.0127228992) |
+| Coin values paid when Cash Stacks triggers (`WinCS`) | 0.048047725940 | — (the sheet counts these in the Hold & Spin feature) |
+| Feature trigger, FGF or HnS | 1 in 76.689091 | 1/161.4593 + 1/146.0675 = 1 in 76.689091 |
+
+Every figure the sheet has matches to its last digit. The base RTP including coin values is 0.438238, against 0.4441 ± 0.0033 from the earlier simulation of paid spins. The calculation takes about 4 minutes on 2 threads (840 engine configurations); `--threads` and `--cache` (below) make it faster and resumable. 30 checks against the full engine agree.
+
+**Also now analytic:** Action Dragons and Mustang Spirit Cash Stacks Gold (class-count), Incan Emperor and Mustang Spirit, Moon Dancer, Grand Emperor and Norse Legend (scatter-count or class-count with the factorised picks).
+
+**Corrections.** Two games that were listed as analytic are now lines-only, because the tool got stricter:
+
+- **BlazinHotLuckyStars.** The feature strategy is keyed by a game-level `Trigger FeatureTrigger {ftrig1 OR ftrig2 OR ftrig3}`, and another feature is entered on a 5-of-a-kind line win. The relevance step now follows game-level triggers (and ignores metamorphic token triggers, which build up over many spins). With the line-win trigger included, the general evaluator needs 36,288 configurations, over the limit.
+- **FaCaiLightning.** The engine's random spins in the feature-entry check give 43 entries in 3,000 (1 in 70), while the scatter-count model said 1 in 162. The trigger rate from those spins is now compared with the model (4.5 s.e.), and a model outside it is rejected.
 
 Remaining blockers, and what would fix each:
 
 | Games | Blocker | Next step |
 |---|---|---|
-| 14 lines-only | Non-line part depends on many symbols at once: hold-and-spin / cash-stack style coins with prize values (Cash Stacks ×3, Emperor/Norse, Thunder Cash, Rise of the Tiger, Moon Dancer, Last Dragon, Treasure Spirits…) | Count-and-prize model: per-class symbol counts (convolution) for triggers, plus per-cell expected prize values measured on engines where the prize replacement is limited to one probe cell |
+| 11 lines-only | Too many configurations or picks: Thunder Cash (1.8M keyed combinations), Last Dragon (33,180 configurations and 8 coin picks with 12 outcomes), Rise of the Tiger and Super Charged 7s (25–33 per-cell picks whose order matters), Treasure Spirits ×2 and Dragons Delight ×2 (ways games), ReelHot7s, BlazinHot, FaCai | Per-cell analytic model for the picks: treat each cell's independent replacement as a distribution in the convolution, and use the engine only on resolved screens |
 | 13 | Metamorphic tokens accumulate in base | Needs a state (Markov) model, the same work as features |
-| 10 | Mapped replacement changes payline symbols (Magnet Storm family, NewConcept2, …) | Mapped evaluator, same approach as floating |
-| 4 | Uniform draws over large ranges (random credit values) | Use the expected value directly |
+| 8 | Replacement changes payline symbols under a condition (mapped: Athena, Eternal Buffalo, Giza, NewConcept2 ×2, RumbleRumble; fixed: CyberCash ×2) | Mapped evaluator, same approach as floating |
+| 4 | Floating replacements with about 1M driver-window combinations (Magnet Storm family) | Condition on fewer driver cells |
 | 2 | Floating replacement triggered by visible scatters (DragonWaves, ZhongKui) | Condition on the scatter count |
-| 2 | Payline cells on a column with no reel | Investigate |
-| 1 + 1 | Chained mystery source (RocketFrenzyDiner); time limit in the sandbox (ReelHot7s, CoinKingdom) | Case by case |
-| 1 | Random-per-cell replacement with a conditional trigger | Condition on the trigger |
-| 1 | Time limit | Run outside the sandbox |
+| 2 | Payline cells on a column with no reel (SuperCrystal7s, SuperLantern8s) | Investigate |
+| 1 | Chained mystery source (RocketFrenzyDiner) | Case by case |
+| 1 | Random-per-cell replacement on paylines with a conditional trigger (UltraShotTiger) | Condition on the trigger |
+| 1 | Time limit in the sandbox (CoinKingdomAztec) | Run outside the sandbox |
 
 ## How it works (engine-driven exact mode)
 
@@ -172,6 +210,7 @@ RTP_Calculator simulate   "...\LaughingDragon.dat" --lines 50 --spins 5000000
 
 - An `.agm` file can be passed instead of a `.dat`. The tool compiles it to a temporary `.dat` with `AgtCompiler.Core`.
 - Total work for Laughing Dragon is about 90 CPU-minutes for the line part and about 8 for the non-line part. On a 16-thread machine, expect roughly 10 minutes.
+- `analytic` and `coverage` take `--threads N` (default: all cores) for the class-count model, and `--cache <file>` (`analytic`) or `--cache <folder>` (`coverage`). The cache keeps every class-count engine measurement, so an interrupted run resumes where it stopped. Delete the cache after changing the game file, bet or lines.
 - To split the work across processes or machines, use `--only lines|nonline`, `--shard k/n` and `--subshard j/m`. Each run prints a `PARTIAL ...` line. Add up the `raw`/`win`/`trigger` values across all parts; `mass` should total 1. The results above were produced this way.
 
 ## What this proof of concept shows
@@ -204,13 +243,13 @@ That leads to four conclusions:
 | `Engine/ScriptedRandomAgent.cs` | Random/scripted RNG with a draw trace |
 | `Engine/GameHost.cs` | Engine instance, snapshot/restore, win accounting, feature-entry suppression |
 | `Engine/EngineSurgery.cs` | Switching replacements off in analysis-only engine instances |
-| `Enumeration/DrawPartition.cs` | Weighted-table cells per draw range |
-| `Enumeration/ActEnumerator.cs` | Exact depth-first enumeration of one spin |
+| `Enumeration/DrawPartition.cs` | Weighted-table cells per draw range (bet-level initialiser templates left out: the engine copies them into the live set) |
+| `Enumeration/ActEnumerator.cs` | Exact depth-first enumeration of one spin; `Expect` factorises repeated picks |
 | `Enumeration/GroupedProductEnumerator.cs` | Parallel enumeration over grouped reel stops, plus sharding |
 | `Analysis/BaseSetup.cs`, `ReelModel.cs` | Reel/line/scatter model read from the engine; stop grouping |
 | `Analysis/Exact/BaseGameExact.cs` | The base-game split (engine-driven exact mode) |
 | `Analysis/Exact/SelfTest.cs` | Assumption checks A–G for exact mode |
 | `Analysis/MonteCarlo.cs`, `DrawProfiler.cs` | Simulation cross-check and feasibility profile |
-| `Analysis/Analytic/*.cs` | Analytic (reel-design) evaluators: `ReplacementCatalog`, `MysteryModel` (per-cell replacement pipeline), `FloatingModel`, `NonLineRelevance`, `LineEvaluator`, `ScatterEvaluator`, `SpecialSymbolEvaluator`, `AnalyticBaseGame` |
+| `Analysis/Analytic/*.cs` | Analytic (reel-design) evaluators: `ReplacementCatalog`, `MysteryModel` (per-cell replacement pipeline), `FloatingModel`, `NonLineRelevance`, `LineEvaluator`, `ScatterEvaluator`, `ClassCountEvaluator`, `SpecialSymbolEvaluator`, `AnalyticBaseGame` |
 | `Analysis/Coverage/*.cs` | Construct scanner and folder coverage runner |
 | `Util/GameFiles.cs` | Loading `.dat` / compiling `.agm` |

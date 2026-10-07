@@ -17,10 +17,13 @@ Usage:
 Commands:
   coverage     Run the construct scan and the analytic calculation over every .agm/.dat in a FOLDER
                (given in place of the game file). Options: --scan-only, --out file.csv,
-               --filter text, --range from:count, --samples N (default 100), --lines N.
+               --filter text, --range from:count, --samples N (default 100), --lines N,
+               --threads N, --cache folder (class-count measurements kept per game, so reruns resume).
   analytic     Base-game RTP from the reel design (seconds): line pays via the engine's matcher,
                scatter trigger / prizes via a few exact engine evaluations, then verification of
                the model against the full engine on random reel stops (--samples, default 200).
+               Coin / prize games use the class-count model (--threads N engines in parallel;
+               --cache file keeps its engine measurements so an interrupted run resumes).
   exact-base   Exact base-game RTP: line wins, non-line wins (scatter / trigger prizes) and
                feature trigger probability. Uses the real engine as the pay evaluator.
   simulate     Emulator-style Monte Carlo, reported per layout, with standard error.
@@ -100,8 +103,9 @@ A .agm input is compiled to a temporary .dat with the AGT compiler; the .agm is 
             {
                 VerifySamples = o.SamplesSpecified ? o.Samples : 100,
                 ScanOnly = o.ScanOnly, Bet = o.Bet, Lines = o.LinesSpecified ? o.Lines : (uint?)null,
-                Filter = o.Filter, Range = o.Range
+                Filter = o.Filter, Range = o.Range, Threads = o.Threads, CacheDir = o.Cache
             };
+            if (o.Cache is not null) Directory.CreateDirectory(o.Cache);
             string output = o.Out ?? Path.Combine(Directory.GetCurrentDirectory(), "coverage.csv");
             runner.CsvPath = output;
             var rows = runner.Run(folder);
@@ -158,7 +162,7 @@ A .agm input is compiled to a temporary .dat with the AGT compiler; the .agm is 
         {
             Console.WriteLine("=== Analytic base game (reel design) ===");
             var sw = Stopwatch.StartNew();
-            var r = new Analysis.Analytic.AnalyticBaseGame(dat, o.Bet, o.Lines) { VerifySamples = o.Samples, SkipNonLine = o.LinesOnly, Verbose = true, VerifySeed = o.VerifySeed }.Run(verify: o.Samples > 0);
+            var r = new Analysis.Analytic.AnalyticBaseGame(dat, o.Bet, o.Lines) { VerifySamples = o.Samples, SkipNonLine = o.LinesOnly, Verbose = true, VerifySeed = o.VerifySeed, Threads = o.Threads, CachePath = o.Cache }.Run(verify: o.Samples > 0);
             Console.WriteLine($"  Mystery construct    : {r.Mystery}");
             Console.WriteLine($"  Reel group sets      : {r.ReelGroupSets}");
             Console.WriteLine($"  Spin scenarios       : {r.Scenarios} (outcomes of the draws made while preparing the spin)");
@@ -178,6 +182,8 @@ A .agm input is compiled to a temporary .dat with the AGT compiler; the .agm is 
             Console.WriteLine();
             Console.WriteLine($"  Base line RTP        : {r.LineRtp:F12}{Compare(r.LineRtp, o.RefLines)}");
             Console.WriteLine($"  Base non-line RTP    : {r.NonLineRtp:F12}{Compare(r.NonLineRtp, o.RefNonLine)}");
+            foreach (var (family, credits) in r.NonLineBreakdown.OrderByDescending(kv => kv.Value))
+                Console.WriteLine($"      {family,-28}: {credits / r.TotalBet:F12}");
             Console.WriteLine($"  Base RTP (total)     : {r.LineRtp + r.NonLineRtp:F12}");
             Console.WriteLine($"  Feature trigger      : p = {r.TriggerProbability:F12}  =  1 in {1 / r.TriggerProbability:F6}{Compare(1 / r.TriggerProbability, o.RefHit)}");
             bool ok = true;

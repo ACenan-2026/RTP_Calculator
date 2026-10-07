@@ -34,7 +34,13 @@ public sealed class ScatterEvaluator
         IReadOnlyList<uint>? scenarioValues = null, IReadOnlyList<uint>? scenarioRanges = null)
     {
         this.model = model; scatter = scatterSymbols; this.host = host;
-        enumerator = new ActEnumerator(host, new DrawPartition(host.Game)) { PathLimitPerAct = pathLimit };
+        var coordinates = model.Reels.SelectMany(x => x.Coordinates).ToArray();
+        int bi = host.BaseLayoutIndex;
+        enumerator = new ActEnumerator(host, new DrawPartition(host.Game, skipInitialiserTemplates: true))
+        {
+            PathLimitPerAct = pathLimit,
+            StateSignature = g => string.Join("|", coordinates.Select(c => g.Game.Layouts.Entry(bi).Value.SymbolAtCoordinate(c).Name.CString))
+        };
         if (scenarioValues is not null) enumerator.SetScenario(scenarioValues, scenarioRanges!);
         baseIndex = host.BaseLayoutIndex;
         // Per reel: mask -> (count, representative stop)
@@ -99,8 +105,14 @@ public sealed class ScatterEvaluator
     {
         OracleConfigurations++;
         var m = new Measurement();
-        enumerator.Enumerate(stops, (h, res, w) =>
+        // Expected values over every in-act draw (repeated picks factorised, see ActEnumerator.Expect):
+        // [other credits, trigger, prize credited at each cell...].
+        var cells = new List<(int reel, int window)>();
+        for (int r = 0; r < model.Reels.Count; r++) for (int w = 0; w < model.Reels[r].Coordinates.Length; w++) cells.Add((r, w));
+        var index = cells.Select((c, i) => (c, i)).ToDictionary(t => t.c, t => t.i);
+        var e = enumerator.Expect(stops, (h, res) =>
         {
+            var v = new double[2 + cells.Count];
             double credited = res.Credited[baseIndex];
             double attributed = h.AllLineWins();
             foreach (var win in h.Game.CurrentLayout.WinningLocatedPayconditions)
@@ -108,13 +120,15 @@ public sealed class ScatterEvaluator
                 if (win.SymbolsInfo.Count != 1) continue;
                 var c = win.SymbolsInfo[0].Coordinate;
                 if (!model.TryLocate(c, out int reel, out int window)) continue;
-                m.Cells[(reel, window)] = (m.Cells.TryGetValue((reel, window), out double v) ? v : 0) + w * win.WonCredits;
+                v[2 + index[(reel, window)]] += win.WonCredits;
                 attributed += win.WonCredits;
             }
-            m.Other += w * (credited - attributed);
-            bool triggered = h.FeatureEntrySuppressed ? h.FeatureEntryTriggered() : res.LeftBase;
-            if (triggered) m.Trigger += w;
+            v[0] = credited - attributed;
+            v[1] = (h.FeatureEntrySuppressed ? h.FeatureEntryTriggered() : res.LeftBase) ? 1 : 0;
+            return v;
         });
+        m.Other = e[0]; m.Trigger = e[1];
+        for (int i = 0; i < cells.Count; i++) if (e[2 + i] != 0) m.Cells[cells[i]] = e[2 + i];
         return m;
     }
 

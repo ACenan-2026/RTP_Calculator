@@ -32,6 +32,10 @@ public sealed class CoverageRunner
     }
 
     public int VerifySamples { get; set; } = 30;
+    /// <summary>Worker threads for the class-count model.</summary>
+    public int Threads { get; set; } = 1;
+    /// <summary>Optional folder for class-count measurement caches (one file per game), so long runs resume.</summary>
+    public string? CacheDir { get; set; }
     public bool ScanOnly { get; set; }
     public uint Bet { get; set; } = 1;
     public uint? Lines { get; set; }
@@ -91,7 +95,11 @@ public sealed class CoverageRunner
         if (ScanOnly) { row.Status = "SCANNED"; return; }
         try
         {
-            var analytic = new AnalyticBaseGame(dat, Bet, lines) { VerifySamples = VerifySamples, OraclePathLimit = 20_000 };
+            var analytic = new AnalyticBaseGame(dat, Bet, lines)
+            {
+                VerifySamples = VerifySamples, OraclePathLimit = 20_000, Threads = Threads,
+                CachePath = CacheDir is null ? null : Path.Combine(CacheDir, Path.GetFileNameWithoutExtension(path) + $"_b{Bet}_l{lines}.cache")
+            };
             var r = analytic.Run(verify: VerifySamples > 0);
             row.LineRtp = r.LineRtp; row.NonLineRtp = r.NonLineRtp; row.HitRate = 1 / r.TriggerProbability;
             if (r.VerifiedLines > 0)

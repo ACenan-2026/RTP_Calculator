@@ -29,6 +29,8 @@ public sealed class NonLineRelevance
     public HashSet<string> RelevantConditions { get; } = new HashSet<string>(StringComparer.Ordinal);
     public List<ReplacementCatalog.Entry> Irrelevant { get; } = new List<ReplacementCatalog.Entry>();
     public string Description { get; private set; } = "";
+    /// <summary>Feature-entry keys that could not be traced to base pay conditions (every cell is then relevant).</summary>
+    public List<string> UnresolvedKeys { get; } = new List<string>();
 
     public static NonLineRelevance Build(AGTReelGame game, AGTLayout layout, string baseLayoutName, ReelModel model, ReplacementCatalog catalog)
     {
@@ -38,6 +40,28 @@ public sealed class NonLineRelevance
 
         var entryKeys = new HashSet<string>(game.Strategies.Where(s => s.Value.Layout.CString != baseLayoutName) /* include strategies an analysis engine has switched off */.Select(s => s.Key), StringComparer.Ordinal);
         var queue = new Queue<string>();
+        bool unresolved = false;
+        // Strategies keyed by a game-level trigger (e.g. Trigger FeatureTrigger {ftrig1 OR ftrig2}): its
+        // components are relevant. A key that resolves to nothing we can see makes every cell relevant.
+        var visitedTriggers = new HashSet<string>(StringComparer.Ordinal);
+        void ResolveKey(string key)
+        {
+            if (!visitedTriggers.Add(key)) return;
+            if (layout.PayConditions.Contains(key)) { queue.Enqueue(key); return; }
+            // Metamorphic token triggers fire on token totals collected over many spins, not on one spin.
+            if (game.MetaTokens.ContainsKey(key) || game.MetaWinTables.Any(x => x.Value.Contains(key))) return;
+            var t = game.Triggers.Contains(key) ? game.Triggers[key] : game.KeyWordTriggers.Contains(key) ? game.KeyWordTriggers[key] : null;
+            if (t is null || t.DependentNames.Length == 0)
+            {
+                // keyed by another layout's condition: cannot be reached from a base spin
+                bool otherLayout = false;
+                for (int l = 0; l < game.Layouts.Count; l++) if (game.Layouts.Entry(l).Value.PayConditions.Contains(key)) otherLayout = true;
+                if (!otherLayout) { unresolved = true; rel.UnresolvedKeys.Add(key); }
+                return;
+            }
+            foreach (var d in t.DependentNames) ResolveKey(d);
+        }
+        foreach (var k in entryKeys) ResolveKey(k);
         foreach (var p in layout.PayConditions)
         {
             var pc = p.Value;
@@ -70,6 +94,7 @@ public sealed class NonLineRelevance
             return false;
         }
 
+        if (unresolved) foreach (var c in allCells) MarkFull(c);
         bool changed = true;
         while (changed)
         {
@@ -128,7 +153,8 @@ public sealed class NonLineRelevance
             if (!e.Targets.Any(t => (rel.FullCells.Contains(t) || rel.CellSymbols.ContainsKey(t)) && catalog.CanAct(e, t)))
                 rel.Irrelevant.Add(e);
         rel.Description = $"{rel.RelevantConditions.Count} relevant condition(s), {rel.FullCells.Count} full + {rel.CellSymbols.Count} partial cell(s), " +
-                          $"{rel.Irrelevant.Count} of {catalog.Entries.Count} replacement(s) irrelevant";
+                          $"{rel.Irrelevant.Count} of {catalog.Entries.Count} replacement(s) irrelevant" +
+                          (rel.UnresolvedKeys.Count > 0 ? $"; feature entry via {string.Join(", ", rel.UnresolvedKeys)} not traced, every cell kept" : "");
         return rel;
     }
 
