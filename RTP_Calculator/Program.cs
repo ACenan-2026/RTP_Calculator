@@ -167,6 +167,7 @@ A .agm input is compiled to a temporary .dat with the AGT compiler; the .agm is 
             Console.WriteLine($"  Reel group sets      : {r.ReelGroupSets}");
             Console.WriteLine($"  Spin scenarios       : {r.Scenarios} (outcomes of the draws made while preparing the spin)");
             Console.WriteLine($"  Floating (lines)     : {r.Floating}");
+            if (r.Ways != "none") Console.WriteLine($"  Ways                 : {r.Ways}");
             if (r.NonLineRelevance.Length > 0) Console.WriteLine($"  Non-line relevance   : {r.NonLineRelevance}");
             Console.WriteLine($"  Non-line method      : {r.NonLineMethod}{(r.LinesOnly ? " - " + r.NonLineError : "")}");
             Console.WriteLine($"  Lines                : {r.BetLines} bet lines, {r.LinePayConditions} line pay conditions, {r.DistinctLineModels} distinct line models");
@@ -181,6 +182,7 @@ A .agm input is compiled to a temporary .dat with the AGT compiler; the .agm is 
             foreach (var n in r.Notes) Console.WriteLine("  note: " + n);
             Console.WriteLine();
             Console.WriteLine($"  Base line RTP        : {r.LineRtp:F12}{Compare(r.LineRtp, o.RefLines)}");
+            if (r.Ways != "none") Console.WriteLine($"      of which ways    : {r.ExpectedWaysWin / r.TotalBet:F12}");
             Console.WriteLine($"  Base non-line RTP    : {r.NonLineRtp:F12}{Compare(r.NonLineRtp, o.RefNonLine)}");
             foreach (var (family, credits) in r.NonLineBreakdown.OrderByDescending(kv => kv.Value))
                 Console.WriteLine($"      {family,-28}: {credits / r.TotalBet:F12}");
@@ -206,7 +208,7 @@ A .agm input is compiled to a temporary .dat with the AGT compiler; the .agm is 
         {
             long spins = o.Spins ?? 2_000_000;
             Console.WriteLine($"=== Simulation ({spins:N0} paid games) ===");
-            var r = new MonteCarlo(dat, o.Bet, o.Lines) { Threads = o.Threads }.Run(spins);
+            var r = new MonteCarlo(dat, o.Bet, o.Lines) { Threads = o.Threads, Seed = 12345 + o.VerifySeed - 4242 }.Run(spins);
             for (int i = 0; i < r.LayoutNames.Length; i++)
                 Console.WriteLine($"  {r.LayoutNames[i],-20} RTP {r.LayoutCredits[i] / r.Cost:F6}" + (i == 0 ? $"  +/- {r.BaseStdError:F6} (1 s.e.)" : ""));
             Console.WriteLine($"  {"Total",-20} RTP {r.Rtp:F6}  +/- {r.RtpStdError:F6} (1 s.e.)");

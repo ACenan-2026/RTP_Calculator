@@ -42,7 +42,14 @@ public sealed class SpecialSymbolEvaluator
     {
         this.model = model; this.host = host;
         baseIndex = host.BaseLayoutIndex;
-        enumerator = new ActEnumerator(host, new DrawPartition(host.Game)) { PathLimitPerAct = pathLimit };
+        var coordinates = model.Reels.SelectMany(x => x.Coordinates).ToArray();
+        int bi = host.BaseLayoutIndex;
+        enumerator = new ActEnumerator(host, new DrawPartition(host.Game))
+        {
+            PathLimitPerAct = pathLimit,
+            // Screen after the act: outcomes of a pick that leave the same screen are merged (see ActEnumerator.Expect).
+            StateSignature = g => string.Join("|", coordinates.Select(c => g.Game.Layouts.Entry(bi).Value.SymbolAtCoordinate(c).Name.CString))
+        };
         enumerator.SetScenario(scenarioValues, scenarioRanges);
         keyOf = key;
         Groups = model.Reels.Select((reel, r) => GroupBy(reel, r)).ToList();
@@ -92,14 +99,13 @@ public sealed class SpecialSymbolEvaluator
 
     private (double win, double trigger) Measure(uint[] stops)
     {
-        double win = 0, trigger = 0;
-        enumerator.Enumerate(stops, (h, res, w) =>
+        // Expected values over every in-spin draw, repeated picks factorised (ActEnumerator.Expect).
+        var e = enumerator.Expect(stops, (h, res) => new[]
         {
-            win += w * ((double)res.Credited[baseIndex] - h.AllLineWins());
-            bool t = h.FeatureEntrySuppressed ? h.FeatureEntryTriggered() : res.LeftBase;
-            if (t) trigger += w;
+            (double)res.Credited[baseIndex] - h.AllLineWins(),
+            (h.FeatureEntrySuppressed ? h.FeatureEntryTriggered() : res.LeftBase) ? 1.0 : 0.0
         });
-        return (win, trigger);
+        return (e[0], e[1]);
     }
 
     /// <summary>Model value for arbitrary stops: the measured value of the group combination they fall in.</summary>

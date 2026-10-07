@@ -67,6 +67,9 @@ public sealed class AnalyticBaseGame
         public long TuplesVisited { get; set; }
         public long PayEvaluations { get; set; }
         public double ExpectedLineWin { get; set; }
+        /// <summary>Part of <see cref="ExpectedLineWin"/> paid by ways (pattern) conditions.</summary>
+        public double ExpectedWaysWin { get; set; }
+        public string Ways { get; set; } = "none";
         public double ExpectedNonLineWin { get; set; }
         public double TriggerProbability { get; set; }
         public string NonLineMethod { get; set; } = "";
@@ -107,6 +110,8 @@ public sealed class AnalyticBaseGame
         public ScatterEvaluator? Count;
         public SpecialSymbolEvaluator? General;
         public ClassCountEvaluator? Classes;
+        public WaysEvaluator? Ways;
+        public double WaysWin;
         public FloatingModel Floating = null!;
         public NonLineRelevance? Relevance;
         public GameHost? NonLineHost;
@@ -156,6 +161,19 @@ public sealed class AnalyticBaseGame
             if (blocking.Count > 0)
                 throw new NotSupportedException($"Replacement {blocking[0]} can change symbols on paylines" +
                                                 (blocking.Count > 1 ? $" (+{blocking.Count - 1} more)" : "") + "; not supported analytically yet.");
+
+            // ---- Ways (pattern) pays: counted with the lines ----
+            var ways = new WaysEvaluator(layout, model, betPerLine, lines);
+            if (ways.Active)
+            {
+                lineTimer.Start();
+                ways.CheckReplacements(sc.Catalog.Entries.Where(e => !sc.Mystery.Handled.Contains(e)), sc.Catalog);
+                sc.Ways = ways; report.Ways = ways.Description;
+                foreach (var outcome in sc.Mystery.Outcomes) sc.WaysWin += outcome.Probability * ways.Expected(sc.Mystery, outcome);
+                sc.LineWin += sc.WaysWin;
+                lineTimer.Stop();
+                Log($"ways: {ways.Description}");
+            }
 
             // ---- Lines ----
             lineTimer.Start();
@@ -273,6 +291,7 @@ public sealed class AnalyticBaseGame
     private static void Combine(Report report, List<Scenario> scenarios)
     {
         report.ExpectedLineWin = scenarios.Sum(s => s.Weight * s.LineWin);
+        report.ExpectedWaysWin = scenarios.Sum(s => s.Weight * s.WaysWin);
         report.NonLineError = scenarios.Select(s => s.NonLineError).FirstOrDefault(e => e is not null);
         report.ExpectedNonLineWin = report.LinesOnly ? double.NaN : scenarios.Sum(s => s.Weight * s.NonLineWin);
         report.TriggerProbability = report.LinesOnly ? double.NaN : scenarios.Sum(s => s.Weight * s.Trigger);
@@ -286,7 +305,7 @@ public sealed class AnalyticBaseGame
         // Only cells/symbols that can influence non-line credits or feature entry matter; replacements that
         // cannot write them are switched off in a dedicated engine instance (results unchanged, far fewer draws).
         var layout = host.Game.Layouts.Entry(host.BaseLayoutIndex).Value;
-        sc.Relevance ??= NonLineRelevance.Build(host.Game, layout, host.LayoutName(host.BaseLayoutIndex), setup.Model, sc.Catalog);
+        sc.Relevance ??= NonLineRelevance.Build(host.Game, layout, host.LayoutName(host.BaseLayoutIndex), setup.Model, sc.Catalog, sc.Ways?.PatternConditions);
         report.NonLineRelevance = sc.Relevance.Description;
         var nonLineHost = sc.NonLineHost ??= LoadNonLineHost(layout, sc.Relevance);
         if (preferCount && setup.ScatterSymbols.Count > 0)
@@ -304,20 +323,25 @@ public sealed class AnalyticBaseGame
                 foreach (var n in count.Notes) if (!report.Notes.Contains(n)) report.Notes.Add(n);
                 return;
             }
-            catch (NotSupportedException e) { report.Notes.Add("scatter-count model not used: " + e.Message); sc.Count = null; Log("scatter-count model not used"); }
+            catch (NotSupportedException e) { if (!report.Notes.Contains("scatter-count model not used: " + e.Message)) report.Notes.Add("scatter-count model not used: " + e.Message); sc.Count = null; Log("scatter-count model not used"); }
         }
         var model = setup.Model; var relevance = sc.Relevance;
-        SpecialSymbolEvaluator general;
+        // Two evaluators: the general one (every relevant-symbol arrangement) and the class-count one (counts on
+        // interchangeable reels). The cheaper one that applies is used.
+        SpecialSymbolEvaluator? general = null; string? generalError = null;
         try
         {
             general = new SpecialSymbolEvaluator(model, (r, p) => relevance.Key(r, model.Reels[r].WindowSymbols[p]), nonLineHost,
                 setup.PrepareValues, setup.PrepareRanges, OraclePathLimit, ConfigurationLimit);
         }
-        catch (NotSupportedException generalError)
+        catch (NotSupportedException e) { generalError = e.Message; }
+        ClassCountEvaluator? classes = null; string? classError = null;
+        try { classes = new ClassCountEvaluator(model, relevance, nonLineHost, setup.PrepareValues, setup.PrepareRanges, Math.Min(OraclePathLimit, ClassPathLimit), ClassConfigurationLimit); }
+        catch (NotSupportedException e) { classError = e.Message; }
+        if (classes is not null && (general is null || classes.Configurations < general.Configurations))
         {
             try
             {
-                var classes = new ClassCountEvaluator(model, relevance, nonLineHost, setup.PrepareValues, setup.PrepareRanges, Math.Min(OraclePathLimit, ClassPathLimit), ClassConfigurationLimit);
                 Log("class-count model: " + classes.Description + $"; {classes.Configurations:N0} engine configurations");
                 classes.Progress = Log;
                 classes.Threads = Threads; classes.CachePath = CachePath;
@@ -329,13 +353,16 @@ public sealed class AnalyticBaseGame
                 report.OracleActs += classes.Acts; report.OracleConfigurations += classes.Configurations;
                 foreach (var (f, v) in classes.Breakdown)
                     report.NonLineBreakdown[f] = (report.NonLineBreakdown.TryGetValue(f, out var old) ? old : 0) + sc.Weight * v;
-                report.Notes.Add($"class-count model: {classes.Description}; {classes.InvarianceChecks} arrangement checks passed; " +
-                                     $"in-spin picks: {classes.FactorSummary}");
+                string note = $"class-count model: {classes.Description}; {classes.InvarianceChecks} arrangement checks passed; " +
+                              $"in-spin picks: {classes.FactorSummary}";
+                if (!report.Notes.Contains(note)) report.Notes.Add(note);
                 report.T = Array.Empty<double>(); report.CountDistribution = Array.Empty<double>(); report.Prizes = new Dictionary<(int, int), double>();
                 return;
             }
-            catch (NotSupportedException e) { sc.Classes = null; throw new NotSupportedException(generalError.Message + " Class-count model: " + e.Message); }
+            catch (NotSupportedException e) { sc.Classes = null; classError = e.Message; }
         }
+        if (general is null) throw new NotSupportedException(generalError + " Class-count model: " + classError);
+        Log($"general evaluator: {general.Configurations:N0} engine configurations ({sc.Relevance!.Description})");
         general.Run();
         sc.General = general;
         sc.NonLineWin = general.ExpectedWin;
@@ -529,13 +556,14 @@ public sealed class AnalyticBaseGame
             }
 
             // Engine: exact over all in-spin draws when feasible, otherwise sampled.
-            double engineLine = 0, engineNonLine = 0, engineTrigger = 0;
-            double seLine = 0, seNonLine = 0, seTrigger = 0; bool sampled = false;
+            double engineLine = 0, engineNonLine = 0, engineTrigger = 0, engineWays = 0;
+            double seLine = 0, seNonLine = 0, seTrigger = 0, seWays = 0; bool sampled = false;
             try
             {
                 enumerator.Enumerate(stops, (h, res, w) =>
                 {
                     if (line >= 0) engineLine += w * h.LineWin(line);
+                    engineWays += w * h.AllPatternWins();
                     engineNonLine += w * ((double)res.Credited[baseIndex] - h.AllLineWins());
                     bool t = h.FeatureEntrySuppressed ? h.FeatureEntryTriggered() : res.LeftBase;
                     if (t) engineTrigger += w;
@@ -547,7 +575,7 @@ public sealed class AnalyticBaseGame
                 sampled = true; report.SampledChecks++;
                 // Sample on an engine with feature entry switched off, so triggering spins need no restore.
                 sampler ??= LoadSampler(host);
-                int n = SampledDraws; double l1 = 0, l2 = 0, o1 = 0, o2 = 0, t1 = 0;
+                int n = SampledDraws; double l1 = 0, l2 = 0, o1 = 0, o2 = 0, t1 = 0, a1 = 0, a2 = 0;
                 for (int k = 0; k < n; k++)
                 {
                     sampler.EnsureBase();
@@ -559,10 +587,12 @@ public sealed class AnalyticBaseGame
                     var res = sampler.EndAccounting(played);
                     double lw = line >= 0 ? sampler.LineWin(line) : 0, ow = (double)res.Credited[baseIndex] - sampler.AllLineWins();
                     bool t = sampler.FeatureEntrySuppressed ? sampler.FeatureEntryTriggered() : res.LeftBase;
+                    double aw = sampler.AllPatternWins(); a1 += aw; a2 += aw * aw;
                     l1 += lw; l2 += lw * lw; o1 += ow; o2 += ow * ow; if (t) t1++;
                 }
                 if (!sampler.FeatureEntryDetectionComplete) samplerTriggerUnknown = true;
-                engineLine = l1 / n; engineNonLine = o1 / n; engineTrigger = t1 / n;
+                engineLine = l1 / n; engineNonLine = o1 / n; engineTrigger = t1 / n; engineWays = a1 / n;
+                seWays = Math.Sqrt(Math.Max(a2 / n - engineWays * engineWays, 0) / n);
                 seLine = Math.Sqrt(Math.Max(l2 / n - engineLine * engineLine, 0) / n);
                 seNonLine = Math.Sqrt(Math.Max(o2 / n - engineNonLine * engineNonLine, 0) / n);
                 seTrigger = Math.Sqrt(Math.Max(engineTrigger * (1 - engineTrigger), 0) / n);
@@ -587,6 +617,18 @@ public sealed class AnalyticBaseGame
                     report.LineMismatches++;
                     if (report.MismatchExamples.Count < 5)
                         report.MismatchExamples.Add($"line {line}: [{string.Join(" ", tuple.Select(s => s.Name.IsEmpty ? "?" : s.Name.CString))}] engine {engineLine}{(sampled ? $" +/- {seLine:G3}" : "")} model {modelLine}");
+                }
+            }
+
+            if (sc.Ways is not null)
+            {
+                double modelWays = sc.Ways.Predict(stops, sc.Mystery, sc.Mystery.OutcomeFor(model, stops));
+                report.VerifiedLines++;
+                if (!Agree(engineWays, modelWays, seWays))
+                {
+                    report.LineMismatches++;
+                    if (report.MismatchExamples.Count < 5)
+                        report.MismatchExamples.Add($"ways stops [{string.Join(",", stops)}]: engine {engineWays}{(sampled ? $" +/- {seWays:G3}" : "")} model {modelWays}");
                 }
             }
 

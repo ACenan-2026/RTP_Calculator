@@ -281,7 +281,8 @@ public sealed class ClassCountEvaluator
     /// <summary>WinCS_42 -> WinCS, WinBonus_BN_Mini_32 -> WinBonus_BN_Mini, K3_FEAT_St -> K3_FEAT_St.</summary>
     private static string Family(string name) => System.Text.RegularExpressions.Regex.Replace(name, "_[0-9]+$", "");
 
-    private static string StopsKey(uint[] stops) => string.Join(",", stops);
+    // Measurements depend on the spin-preparation scenario too (e.g. which reel group is active).
+    private string StopsKey(uint[] stops) => (scenarioValues.Count > 0 ? "s" + string.Join(".", scenarioValues) + ":" : "") + string.Join(",", stops);
 
     /// <summary>Engine measurement for every distinct stop vector, in parallel, resuming from the cache file.</summary>
     private Dictionary<string, double[]> MeasureAll(List<uint[]> all)

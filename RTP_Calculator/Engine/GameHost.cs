@@ -215,11 +215,23 @@ public sealed class GameHost
         return sum;
     }
 
-    /// <summary>Sum of all line wins in the act just played.</summary>
+    /// <summary>
+    /// Sum of all line-type wins in the act just played: payline wins plus ways (pattern) wins. These are
+    /// computed by the line and ways evaluators; everything else is "non-line".
+    /// </summary>
     public ulong AllLineWins()
     {
         ulong sum = 0;
         foreach (var w in Game.CurrentLayout.WinningStandardPayconditions) sum += w.WonCredits;
+        return sum + AllPatternWins();
+    }
+
+    /// <summary>Sum of the ways (pattern) wins in the act just played.</summary>
+    public ulong AllPatternWins()
+    {
+        ulong sum = 0;
+        foreach (var w in Game.CurrentLayout.WinningPatternPayconditions)
+            foreach (var c in w.CoincidingWins) sum += c.WonCredits;
         return sum;
     }
 

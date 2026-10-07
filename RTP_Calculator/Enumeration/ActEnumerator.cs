@@ -195,75 +195,46 @@ public sealed class ActEnumerator
         if (p >= ranges.Count) return m;
         uint range = ranges[p];
 
-        // A run of units starting here?
+        // A run of units starting here? Units are found by stride: the same range every `stride` draws. Picks and
+        // their companions can share a range (pick 1 of 3 symbols, then 1 of 3 cells), so every stride up to 4 is a
+        // candidate, the one covering most draws first.
         if (!nonRunRanges.Contains(range))
         {
-            int next = p + 1;
-            while (next < ranges.Count && ranges[next] != range) next++;
-            int stride = next - p, units = 1;
-            if (next < ranges.Count)
+            var candidates = new List<(int stride, int units)>();
+            for (int stride = 1; stride <= 4; stride++)
+            {
+                int units = 1;
                 while (p + units * stride < ranges.Count && ranges[p + units * stride] == range) units++;
-            if (units >= 2)
+                if (units >= 2) candidates.Add((stride, units));
+            }
+            double largest = 0;
+            foreach (var (stride, units) in candidates.OrderByDescending(c => c.stride * c.units).ThenBy(c => c.stride))
             {
                 int length = Math.Min(units * stride, ranges.Count - p);
-                try { return Run(req, pv, pr, metrics, (ranges, m), p, range, units, stride, length); }
-                catch (ScriptDivergenceException e) { FactorFailures++; nonRunRanges.Add(range); LastFactorFailure = $"range {range} x{units}/{stride}: {e.Message}"; }
-                catch (FactorCheckFailed e) { FactorFailures++; nonRunRanges.Add(range); LastFactorFailure = $"range {range} x{units}/{stride}: {e.Message}"; }
-                // Multiplying the run out must stay within the path limit.
+                try { return Run(req, pv, pr, metrics, (ranges, m), p, range, units, stride, length, shiftLater: true); }
+                catch (ScriptDivergenceException e) { FactorFailures++; LastFactorFailure = $"range {range} x{units}/{stride}: {e.Message}"; }
+                catch (FactorCheckFailed e) { FactorFailures++; LastFactorFailure = $"range {range} x{units}/{stride}: {e.Message}"; }
                 double size = 1;
                 for (int d = p; d < p + length; d++) size *= partition.Cells(ranges[d]).Length;
-                if (size > PathLimitPerAct)
-                    throw new NotSupportedException($"{units} repeated picks could not be factorised ({LastFactorFailure}) and multiply out to {size:G3} branches.");
+                largest = Math.Max(largest, size);
+            }
+            if (candidates.Count > 0)
+            {
+                nonRunRanges.Add(range);
+                // Multiplying the run out must stay within the path limit.
+                if (largest > PathLimitPerAct)
+                    throw new NotSupportedException($"Repeated picks could not be factorised ({LastFactorFailure}) and multiply out to {largest:G3} branches.");
             }
         }
 
         var cells = partition.Cells(range);
         var acc = new double[m.Length];
-        // Outcome 0 in full; other outcomes that leave the same later draws reuse its later-draw contribution
-        // (checked on random outcomes).
-        var first = Node(req, new List<uint>(pv) { cells[0] }, new List<uint>(pr) { range }, metrics, (ranges, m));
-        var shift = new double[m.Length];
-        for (int x = 0; x < shift.Length; x++) shift[x] = first[x] - m[x];
-        bool hasTail = ranges.Count > p + 1;
-        var shiftedCells = new List<(int k, double[] e)>();
         for (int k = 0; k < cells.Length; k++)
         {
             uint end = k + 1 < cells.Length ? cells[k + 1] : range;
             double w = (double)(end - cells[k]) / range;
-            double[] sub;
-            if (k == 0) sub = first;
-            else
-            {
-                var cv = new List<uint>(pv) { cells[k] }; var cr = new List<uint>(pr) { range };
-                var played = Play(req, cv, cr, metrics);
-                if (played.ranges.Count == ranges.Count && played.ranges.Skip(p + 1).SequenceEqual(ranges.Skip(p + 1)))
-                {
-                    sub = new double[m.Length];
-                    for (int x = 0; x < sub.Length; x++) sub[x] = played.m[x] + shift[x];
-                    if (hasTail) shiftedCells.Add((k, sub));
-                }
-                else sub = Node(req, cv, cr, metrics, played);
-            }
+            var sub = Node(req, new List<uint>(pv) { cells[k] }, new List<uint>(pr) { range }, metrics, k == 0 ? (ranges, m) : null);
             for (int x = 0; x < acc.Length; x++) acc[x] += w * sub[x];
-        }
-        for (int c = 0; c < ChecksPerRun && shiftedCells.Count > 0; c++)
-        {
-            var (k, predicted) = shiftedCells[checkRandom.Next(shiftedCells.Count)];
-            var full = Node(req, new List<uint>(pv) { cells[k] }, new List<uint>(pr) { range }, metrics, null);
-            FactorChecks++;
-            if (!Equal(full, predicted))
-            {
-                // Later draws interact with this one: evaluate every outcome in full.
-                FactorFailures++; LastFactorFailure = $"range {range}: later draws interact with this draw";
-                Array.Clear(acc, 0, acc.Length);
-                for (int j = 0; j < cells.Length; j++)
-                {
-                    uint end = j + 1 < cells.Length ? cells[j + 1] : range;
-                    var sub = j == 0 ? first : Node(req, new List<uint>(pv) { cells[j] }, new List<uint>(pr) { range }, metrics, null);
-                    for (int x = 0; x < acc.Length; x++) acc[x] += (double)(end - cells[j]) / range * sub[x];
-                }
-                break;
-            }
         }
         return acc;
     }
@@ -276,7 +247,7 @@ public sealed class ActEnumerator
     }
 
     private double[] Run(uint[] req, List<uint> pv, List<uint> pr, Func<GameHost, ActResult, double[]> metrics,
-        (List<uint> ranges, double[] m) zeroTrace, int p, uint range, int units, int stride, int length)
+        (List<uint> ranges, double[] m) zeroTrace, int p, uint range, int units, int stride, int length, bool shiftLater)
     {
         var cells = partition.Cells(range);
         int n = cells.Length;
@@ -296,15 +267,37 @@ public sealed class ActEnumerator
         var zero = new int[units];
         var reference = Eval(zero);
 
-        // Companion draws (e.g. which interchangeable cell gets the picked symbol) must not matter.
+        // Companion draws (e.g. which interchangeable cell gets the picked symbol) must not matter: every value of
+        // every companion is tried with the units at their first outcome and at one random assignment.
+        // Cheap filter first: one play per companion value (later draws at their first outcome).
         for (int d = 0; d < length; d++)
         {
             if (d % stride == 0) continue;
             var cc = partition.Cells(r[pv.Count + d]);
-            if (cc.Length < 2) continue;
-            var changed = Node(req, Values(zero, (d, cc[1 + checkRandom.Next(cc.Length - 1)])), r, metrics, null);
-            FactorChecks++;
-            if (!Equal(changed, reference)) throw new FactorCheckFailed("companion draw " + d + " matters");
+            for (int k = 1; k < cc.Length; k++)
+            {
+                var played = Play(req, Values(zero, (d, cc[k])), r, metrics);
+                FactorChecks++;
+                if (!Equal(played.m, zeroTrace.m) || !played.ranges.SequenceEqual(zeroTrace.ranges)) throw new FactorCheckFailed("companion draw " + d + " matters");
+            }
+        }
+        var randomUnits = new int[units];
+        for (int i = 0; i < units; i++) randomUnits[i] = checkRandom.Next(n);
+        double[]? randomBase = null;
+        for (int d = 0; d < length; d++)
+        {
+            if (d % stride == 0) continue;
+            var cc = partition.Cells(r[pv.Count + d]);
+            for (int k = 1; k < cc.Length; k++)
+            {
+                var changed = Node(req, Values(zero, (d, cc[k])), r, metrics, null);
+                FactorChecks++;
+                if (!Equal(changed, reference)) throw new FactorCheckFailed("companion draw " + d + " matters");
+                randomBase ??= Node(req, Values(randomUnits), r, metrics, null);
+                var changedRandom = Node(req, Values(randomUnits, (d, cc[k])), r, metrics, null);
+                FactorChecks++;
+                if (!Equal(changedRandom, randomBase)) throw new FactorCheckFailed("companion draw " + d + " matters");
+            }
         }
 
         // Per unit: merge outcomes that leave the same state (screen, result, later draws), then group the
@@ -377,7 +370,7 @@ public sealed class ActEnumerator
         double[] Evaluate(int[] cellsOf, bool recordShift)
         {
             var played = Play(req, Values(cellsOf), r, metrics);
-            if (played.ranges.Count == zeroTrace.ranges.Count && played.ranges.Skip(tailStart).SequenceEqual(refTail))
+            if (shiftLater && played.ranges.Count == zeroTrace.ranges.Count && played.ranges.Skip(tailStart).SequenceEqual(refTail))
             {
                 var e = new double[reference.Length];
                 for (int x = 0; x < e.Length; x++) e[x] = played.m[x] + shift[x];
@@ -405,13 +398,15 @@ public sealed class ActEnumerator
             while (d >= 0 && ++pick[d] == groupSets[d].Count) { pick[d] = 0; d--; }
             if (d < 0) break;
         }
-        for (int c = 0; c < ChecksPerRun && shifted.Count > 0; c++)
+        // Later picks must not interact with this run: up to 8 shifted combinations (all if fewer) are evaluated in full.
+        var toCheck = shifted.Count <= 8 ? shifted : Enumerable.Range(0, 8).Select(_ => shifted[checkRandom.Next(shifted.Count)]).ToList();
+        foreach (var cellsOf in toCheck)
         {
-            var cellsOf = shifted[checkRandom.Next(shifted.Count)];
             var full = Eval(cellsOf);
             FactorChecks++;
             var key = KeyOfClasses(Enumerable.Range(0, units).Select(i => unitClassOf[i][cellsOf[i]]).ToArray());
-            if (!Equal(full, cache[key])) throw new FactorCheckFailed($"later picks interact with this run: {string.Join(",", full)} vs {string.Join(",", cache[key])}");
+            // Later picks interact with this run: evaluate every combination with its own later picks.
+            if (!Equal(full, cache[key])) { FactorFailures++; return Run(req, pv, pr, metrics, zeroTrace, p, range, units, stride, length, shiftLater: false); }
         }
         // A random sequence of raw outcomes must give the same result as its merged, sorted form.
         for (int c = 0; c < ChecksPerRun; c++)

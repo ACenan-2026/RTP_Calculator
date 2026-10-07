@@ -58,7 +58,8 @@ RTP_Calculator analytic "...\LaughingDragon.dat" --lines 50 --samples 200 --ref-
 | After ReelGroupSet outcomes | 43 | 63 | 0 |
 | After floating replacements | 51 + 8 lines-only | 47 | 0 |
 | After non-line relevance | 58 + 14 lines-only | 34 | 0 |
-| Current (class-count model, factorised picks) | **64** + 11 lines-only | 31 | **0** |
+| After the class-count model, factorised picks | 64 + 11 lines-only | 31 | 0 |
+| Current (ways evaluator) | **68** + 7 lines-only | 31 | **0** |
 
 All 107 distinct games were run; CoinKingdomAztec timed out in the sandbox and is included under "Not supported".
 
@@ -157,11 +158,35 @@ Every figure the sheet has matches to its last digit. The base RTP including coi
 - **BlazinHotLuckyStars.** The feature strategy is keyed by a game-level `Trigger FeatureTrigger {ftrig1 OR ftrig2 OR ftrig3}`, and another feature is entered on a 5-of-a-kind line win. The relevance step now follows game-level triggers (and ignores metamorphic token triggers, which build up over many spins). With the line-win trigger included, the general evaluator needs 36,288 configurations, over the limit.
 - **FaCaiLightning.** The engine's random spins in the feature-entry check give 43 entries in 3,000 (1 in 70), while the scatter-count model said 1 in 162. The trigger rate from those spins is now compared with the model (4.5 s.e.), and a model outside it is rejected.
 
+### Ways games (`WaysEvaluator`)
+
+Ways pays (`PatternWin`) are computed with the lines, following the engine's rules (`AGTLayout.MatchPattern`, `ProcessPatternPayLine`):
+
+- Conditions with the same block name form a block, tried shortest first. Column x matches when one of its cells equals the condition's x-th symbol (the engine's own symbol comparison, so wilds count). The winner is the longest condition the leading matching columns reach.
+- The winner pays its credit for every way: the product of the numbers of matching cells in its columns.
+- Each column comes from a different reel, so the columns are independent and the expectation factorises:
+  E[block win] = Σ_j pay_j × Π_{x<L_j} E[matching cells in column x] × P(the run stops before L_{j+1}).
+  Each column is averaged over its reel's stops, with mystery and per-cell replacements applied cell by cell.
+- This takes milliseconds. Verification compares the model's ways win for random stops with the engine's.
+- The non-line part leaves ways wins out, so the relevance step no longer treats every cell as relevant in ways games.
+- Not supported yet (refused with a message): any-order, multiplied or wild-only patterns, multiplier symbols, a column spread over several reels, and replacements this tool can't model that change a ways cell.
+
+| Game | Ways RTP | Non-line RTP | Base RTP | Simulated paid spin | Trigger (analytic / simulated) |
+|---|---|---|---|---|---|
+| Dragons Delight (4 reel-group scenarios) | 0.596015 | 0 | 0.596015 | 0.6054 ± 0.0083 | 1 in 162.16 / 165.2 |
+| Treasure Spirits Dragon (with Cash Stacks) | 0.297862 | 0.235830 | 0.533692 | 0.5320 ± 0.0021 (900k games, two seeds) | 1 in 70.85 / 71.0 |
+| Treasure Spirits Phoenix | 0.295255 | 0.235734 | 0.530990 | — | 1 in 70.85 |
+| Triple Troves Dragons Delight | 0.604946 | 0 | 0.604946 | — | 1 in 162.16 |
+
+All four pass 30–40 checks against the full engine. They were previously listed as lines-only with a line RTP of 0: they have no paylines, so their whole base win was missing.
+
+**A correction to the in-spin factorisation.** Dragons Delight showed that one shortcut was unsafe. For a single draw, the tool reused the contribution of later draws from its first outcome whenever the later draws looked the same. In Dragons Delight the later trigger draw depends on which feature symbols the earlier picks produced, and the 2 random checks missed it (one screen gave a trigger of 1 in 43.6 instead of the correct 1 in 42.9). That shortcut is removed. Single draws are now always multiplied out. The run-level version checks every reused combination when there are 8 or fewer, and 8 random ones otherwise. It also tries every possible unit length for repeated picks (a symbol pick and a position pick can share a range), and checks every companion value at two settings. On the test screens the results now equal the full enumeration (e.g. 0.0252072582716 with 617 engine plays instead of 233,280). Galaxy Gold's figures are unchanged, but its configurations take about 3 times as many plays.
+
 Remaining blockers, and what would fix each:
 
 | Games | Blocker | Next step |
 |---|---|---|
-| 11 lines-only | Too many configurations or picks: Thunder Cash (1.8M keyed combinations), Last Dragon (33,180 configurations and 8 coin picks with 12 outcomes), Rise of the Tiger and Super Charged 7s (25–33 per-cell picks whose order matters), Treasure Spirits ×2 and Dragons Delight ×2 (ways games), ReelHot7s, BlazinHot, FaCai | Per-cell analytic model for the picks: treat each cell's independent replacement as a distribution in the convolution, and use the engine only on resolved screens |
+| 7 lines-only | Too many configurations or picks: Thunder Cash (1.8M keyed combinations), Last Dragon (33,180 configurations and 8 coin picks with 12 outcomes), Rise of the Tiger and Super Charged 7s (25–33 per-cell picks whose order matters), ReelHot7s, BlazinHot, FaCai | Per-cell analytic model for the picks: treat each cell's independent replacement as a distribution in the convolution, and use the engine only on resolved screens |
 | 13 | Metamorphic tokens accumulate in base | Needs a state (Markov) model, the same work as features |
 | 8 | Replacement changes payline symbols under a condition (mapped: Athena, Eternal Buffalo, Giza, NewConcept2 ×2, RumbleRumble; fixed: CyberCash ×2) | Mapped evaluator, same approach as floating |
 | 4 | Floating replacements with about 1M driver-window combinations (Magnet Storm family) | Condition on fewer driver cells |
@@ -169,7 +194,7 @@ Remaining blockers, and what would fix each:
 | 2 | Payline cells on a column with no reel (SuperCrystal7s, SuperLantern8s) | Investigate |
 | 1 | Chained mystery source (RocketFrenzyDiner) | Case by case |
 | 1 | Random-per-cell replacement on paylines with a conditional trigger (UltraShotTiger) | Condition on the trigger |
-| 1 | Time limit in the sandbox (CoinKingdomAztec) | Run outside the sandbox |
+| 1 | CoinKingdomAztec: a ways game with 91 reels in reel groups; the process runs out of memory in the sandbox before the analysis starts | Investigate |
 
 ## How it works (engine-driven exact mode)
 
@@ -250,6 +275,6 @@ That leads to four conclusions:
 | `Analysis/Exact/BaseGameExact.cs` | The base-game split (engine-driven exact mode) |
 | `Analysis/Exact/SelfTest.cs` | Assumption checks A–G for exact mode |
 | `Analysis/MonteCarlo.cs`, `DrawProfiler.cs` | Simulation cross-check and feasibility profile |
-| `Analysis/Analytic/*.cs` | Analytic (reel-design) evaluators: `ReplacementCatalog`, `MysteryModel` (per-cell replacement pipeline), `FloatingModel`, `NonLineRelevance`, `LineEvaluator`, `ScatterEvaluator`, `ClassCountEvaluator`, `SpecialSymbolEvaluator`, `AnalyticBaseGame` |
+| `Analysis/Analytic/*.cs` | Analytic (reel-design) evaluators: `ReplacementCatalog`, `MysteryModel` (per-cell replacement pipeline), `FloatingModel`, `NonLineRelevance`, `LineEvaluator`, `ScatterEvaluator`, `ClassCountEvaluator`, `WaysEvaluator`, `SpecialSymbolEvaluator`, `AnalyticBaseGame` |
 | `Analysis/Coverage/*.cs` | Construct scanner and folder coverage runner |
 | `Util/GameFiles.cs` | Loading `.dat` / compiling `.agm` |

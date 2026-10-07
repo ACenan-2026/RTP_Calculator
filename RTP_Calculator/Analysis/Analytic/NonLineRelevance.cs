@@ -32,7 +32,10 @@ public sealed class NonLineRelevance
     /// <summary>Feature-entry keys that could not be traced to base pay conditions (every cell is then relevant).</summary>
     public List<string> UnresolvedKeys { get; } = new List<string>();
 
-    public static NonLineRelevance Build(AGTReelGame game, AGTLayout layout, string baseLayoutName, ReelModel model, ReplacementCatalog catalog)
+    /// <param name="handledPatterns">Ways (pattern) conditions whose credits the ways evaluator computes: they are
+    /// only relevant here if a feature is entered on them.</param>
+    public static NonLineRelevance Build(AGTReelGame game, AGTLayout layout, string baseLayoutName, ReelModel model, ReplacementCatalog catalog,
+        ISet<string>? handledPatterns = null)
     {
         var rel = new NonLineRelevance();
         var allCells = new List<(int, int)>();
@@ -69,6 +72,7 @@ public sealed class NonLineRelevance
             layout.Credits.ResolveCreditWeight(pc.Statistics, 1);
             bool pays = pc.Statistics.NominalCreditWeight > 0 || pc.Statistics.DynamicPay || !pc.Statistics.Pool.IsEmpty
                         || pc.QueuedDynamicPay || pc.FreeGamesAwarded > 0;
+            if (handledPatterns is not null && handledPatterns.Contains(p.Key) && !entryKeys.Contains(p.Key)) continue;
             if (pays || entryKeys.Contains(p.Key)) queue.Enqueue(p.Key);
         }
 
