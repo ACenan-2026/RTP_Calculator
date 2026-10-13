@@ -116,13 +116,15 @@ public sealed class LineEvaluator
     public static List<(double p, AGTSymbol s)> CellDistribution(ReelInfo reel, int reelIndex, int window, MysteryModel mystery, MysteryModel.Outcome outcome)
     {
         var map = new Dictionary<string, (double p, AGTSymbol symbol)>(StringComparer.Ordinal);
-        double unit = 1.0 / reel.Range;
-        for (uint p = 0; p < reel.Range; p++)
+        foreach (var (p, count) in reel.Stops)
+        {
+            double unit = (double)count / reel.Range;
             foreach (var (q, s) in mystery.Effective(reelIndex, window, reel.WindowSymbols[p][window], outcome))
             {
                 string name = s.Name.CString;
                 map[name] = map.TryGetValue(name, out var c) ? (c.p + unit * q, c.symbol) : (unit * q, s);
             }
+        }
         return map.Values.Select(v => (v.p, v.symbol)).OrderBy(v => v.symbol.Name.CString, StringComparer.Ordinal).ToList();
     }
 

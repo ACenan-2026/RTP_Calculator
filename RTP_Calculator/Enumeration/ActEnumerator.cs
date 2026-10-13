@@ -165,21 +165,39 @@ public sealed class ActEnumerator
         return result;
     }
 
+    /// <summary>Plays that had to be repeated from a fresh restore because the lazily kept state was not clean.</summary>
+    public long Replays { get; private set; }
+    public string? LastReplayState { get; private set; }
+
     private (List<uint> ranges, double[] m) Play(uint[] requestValues, List<uint> pv, List<uint> pr, Func<GameHost, ActResult, double[]> metrics)
     {
-        host.EnsureBase(AlwaysRestore);
-        host.Agent.BeginScripted(pv, pr, pv.Count);
-        host.BeginAccounting();
-        var requests = host.Session.Prepare(host.BetPerLine, host.Lines);
-        CheckRequests(requests, requestValues);
-        int played = (int)host.Game.CurrentLayoutIndex;
-        host.Session.Complete(requestValues);
-        var result = host.EndAccounting(played);
-        Paths++; pathsThisExpect++;
-        if (pathsThisExpect > PathLimitPerAct)
-            throw new NotSupportedException($"More than {PathLimitPerAct:N0} internal random branches in one spin; too many to enumerate exactly.");
-        lastSignature = StateSignature?.Invoke(host);
-        return (new List<uint>(host.Agent.Ranges), metrics(host, result));
+        for (int attempt = 0; ; attempt++)
+        {
+            string before = attempt == 0 && host.StateMode ? host.StateSignature() : "";
+            host.EnsureBase(AlwaysRestore || attempt > 0);
+            try
+            {
+                host.Agent.BeginScripted(pv, pr, pv.Count);
+                host.BeginAccounting();
+                var requests = host.Session.Prepare(host.BetPerLine, host.Lines);
+                CheckRequests(requests, requestValues);
+                int played = (int)host.Game.CurrentLayoutIndex;
+                host.Session.Complete(requestValues);
+                var result = host.EndAccounting(played);
+                Paths++; pathsThisExpect++;
+                if (pathsThisExpect > PathLimitPerAct)
+                    throw new NotSupportedException($"More than {PathLimitPerAct:N0} internal random branches in one spin; too many to enumerate exactly.");
+                lastSignature = StateSignature?.Invoke(host);
+                return (new List<uint>(host.Agent.Ranges), metrics(host, result));
+            }
+            catch (ScriptDivergenceException) when (attempt == 0 && !AlwaysRestore)
+            {
+                // The state kept from the previous act was not clean (something outside the state signature changed):
+                // start again from the snapshot.
+                Replays++; LastReplayState = before;
+                host.RestoreAfterError();
+            }
+        }
     }
 
     /// <summary>Conditional expectation given the first pv.Count draws (later draws enumerated).</summary>

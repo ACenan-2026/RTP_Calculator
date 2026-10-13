@@ -32,7 +32,9 @@ public sealed class ClassCountEvaluator
     private readonly Func<int, uint, string> keyOf;
     private readonly List<Dictionary<string, int>> keyedIndex = new List<Dictionary<string, int>>();
     // Per count reel: vector key -> stops showing it.
-    private readonly List<Dictionary<string, List<uint>>> reelVectors = new List<Dictionary<string, List<uint>>>();
+    // Per count reel: vector key -> representative stops showing it and the number of stop values they stand for.
+    private readonly List<Dictionary<string, (List<uint> stops, long count)>> reelVectors = new List<Dictionary<string, (List<uint>, long)>>();
+    private Dictionary<string, int> classIndex = null!;
     private readonly Dictionary<string, Total> totals = new Dictionary<string, Total>(StringComparer.Ordinal);
     private readonly Dictionary<string, double[]> results = new Dictionary<string, double[]>(StringComparer.Ordinal);
     // Non-line pay condition families (name without a trailing _<cell> suffix), for the breakdown.
@@ -112,24 +114,22 @@ public sealed class ClassCountEvaluator
         // Classes: relevant symbols that actually appear on the count reels (by name; matched like the relevance key).
         var present = new SortedSet<string>(StringComparer.Ordinal);
         foreach (int r in countReels)
-            foreach (var window in model.Reels[r].WindowSymbols)
+            foreach (var window in model.Reels[r].Stops.Select(x => model.Reels[r].WindowSymbols[x.stop]))
                 foreach (var s in window)
                     if (relevantSet.Contains(s.Name.CString) || (!s.AliasName.IsEmpty && relevantSet.Contains(s.AliasName.CString)))
                         present.Add(s.Name.CString);
         classes = present.ToArray();
-        var classIndex = classes.Select((c, i) => (c, i)).ToDictionary(t => t.c, t => t.i, StringComparer.Ordinal);
+        classIndex = classes.Select((c, i) => (c, i)).ToDictionary(t => t.c, t => t.i, StringComparer.Ordinal);
 
         foreach (int r in countReels)
         {
-            var reel = model.Reels[r]; var map = new Dictionary<string, List<uint>>(StringComparer.Ordinal);
-            for (uint p = 0; p < reel.Range; p++)
+            var reel = model.Reels[r]; var map = new Dictionary<string, (List<uint> stops, long count)>(StringComparer.Ordinal);
+            foreach (var (p, count) in reel.Stops)
             {
-                var v = new int[classes.Length];
-                foreach (var s in reel.WindowSymbols[p])
-                    if (classIndex.TryGetValue(s.Name.CString, out int ci)) v[ci]++;
-                string k = VectorKey(v);
-                if (!map.TryGetValue(k, out var list)) map[k] = list = new List<uint>();
-                list.Add(p);
+                string k = VectorKey(VectorAt(r, p));
+                if (!map.TryGetValue(k, out var entry)) entry = (new List<uint>(), 0);
+                entry.stops.Add(p);
+                map[k] = (entry.stops, entry.count + count);
             }
             reelVectors.Add(map);
         }
@@ -149,14 +149,23 @@ public sealed class ClassCountEvaluator
 
     private static string VectorKey(int[] v) => string.Join(".", v);
 
+    /// <summary>Class counts shown by reel <paramref name="r"/> at <paramref name="stop"/>.</summary>
+    private int[] VectorAt(int r, uint stop)
+    {
+        var v = new int[classes.Length];
+        foreach (var sym in model.Reels[r].WindowSymbols[stop])
+            if (classIndex.TryGetValue(sym.Name.CString, out int ci)) v[ci]++;
+        return v;
+    }
+
     private List<StopGroup> GroupBy(ReelInfo reel, int r)
     {
         var groups = new Dictionary<string, StopGroup>(StringComparer.Ordinal); var order = new List<string>();
-        for (uint p = 0; p < reel.Range; p++)
+        foreach (var (p, count) in reel.Stops)
         {
             string k = keyOf(r, p);
-            if (groups.TryGetValue(k, out var g)) g.Count++;
-            else { groups[k] = new StopGroup(k, p, 1); order.Add(k); }
+            if (groups.TryGetValue(k, out var g)) g.Count += count;
+            else { groups[k] = new StopGroup(k, p, count); order.Add(k); }
         }
         return order.Select(k => groups[k]).ToList();
     }
@@ -174,13 +183,13 @@ public sealed class ClassCountEvaluator
             double range = model.Reels[countReels[i]].Range;
             var next = new Dictionary<string, Total>(StringComparer.Ordinal);
             foreach (var t in current.Values)
-                foreach (var (vk, stops) in reelVectors[i])
+                foreach (var (vk, entry) in reelVectors[i])
                 {
                     var add = vk.Split('.').Select(int.Parse).ToArray();
                     var v = t.Vector.Zip(add, (a, b) => a + b).ToArray();
                     string k = VectorKey(v);
                     if (!next.TryGetValue(k, out var n)) next[k] = n = new Total { Vector = v };
-                    n.Probability += t.Probability * stops.Count / range;
+                    n.Probability += t.Probability * entry.count / range;
                     foreach (var real in t.Realisations)
                         if (n.Realisations.Count < keepRealisations) n.Realisations.Add(real.Append(vk).ToArray());
                 }
@@ -240,7 +249,7 @@ public sealed class ClassCountEvaluator
             for (int i = 0; i < keyedReels.Length; i++)
             {
                 var g = KeyedGroups[i][idx[i]];
-                var same = Enumerable.Range(0, (int)model.Reels[keyedReels[i]].Range).Where(p => keyOf(keyedReels[i], (uint)p) == g.Key).ToList();
+                var same = model.Reels[keyedReels[i]].Stops.Select(x => x.stop).Where(p => keyOf(keyedReels[i], p) == g.Key).ToList();
                 stops[keyedReels[i]] = (uint)same[rng.Next(same.Count)];
             }
             var t = totals[parts[1]];
@@ -274,7 +283,7 @@ public sealed class ClassCountEvaluator
     {
         var v = new int[classes.Length];
         for (int i = 0; i < countReels.Length; i++)
-            v = v.Zip(reelVectors[i].First(kv => kv.Value.Contains(stops[countReels[i]])).Key.Split('.').Select(int.Parse), (a, b) => a + b).ToArray();
+            v = v.Zip(VectorAt(countReels[i], stops[countReels[i]]), (a, b) => a + b).ToArray();
         return string.Join(" ", classes.Select((c, i) => $"{c}={v[i]}"));
     }
 
@@ -348,7 +357,7 @@ public sealed class ClassCountEvaluator
     {
         for (int i = 0; i < countReels.Length; i++)
         {
-            var list = reelVectors[i][realisation[i]];
+            var list = reelVectors[i][realisation[i]].stops;
             stops[countReels[i]] = rng is null ? list[0] : list[rng.Next(list.Count)];
         }
     }
@@ -357,7 +366,7 @@ public sealed class ClassCountEvaluator
     {
         var m = new double[2 + families.Length];
         m[0] = (double)res.Credited[baseIndex] - h.AllLineWins();
-        m[1] = (h.FeatureEntrySuppressed ? h.FeatureEntryTriggered() : res.LeftBase) ? 1.0 : 0.0;
+        m[1] = h.EntryTriggered(res) ? 1.0 : 0.0;
         var layout = h.Game.Layouts.Entry(baseIndex).Value;
         void Add(IReadOnlyList<AgtEngine.Core.ReelGame.PayLineWinInfo> wins)
         {
@@ -384,7 +393,7 @@ public sealed class ClassCountEvaluator
         var v = new int[classes.Length];
         for (int i = 0; i < countReels.Length; i++)
         {
-            var add = reelVectors[i].First(kv => kv.Value.Contains(stops[countReels[i]])).Key.Split('.').Select(int.Parse);
+            var add = VectorAt(countReels[i], stops[countReels[i]]);
             v = v.Zip(add, (a, b) => a + b).ToArray();
         }
         return results[string.Join(",", idx) + "|" + VectorKey(v)];

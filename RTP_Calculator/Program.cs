@@ -26,6 +26,8 @@ Commands:
                --cache file keeps its engine measurements so an interrupted run resumes).
   exact-base   Exact base-game RTP: line wins, non-line wins (scatter / trigger prizes) and
                feature trigger probability. Uses the real engine as the pay evaluator.
+  feature      Expected value of a feature (--layout name) as a Markov chain over engine states: each state's
+               spin computed exactly, sub-features entered from it reported separately (--cache file resumes).
   simulate     Emulator-style Monte Carlo, reported per layout, with standard error.
   profile      Random-draw profile per layout: how big a brute-force enumeration of one act is.
   selftest     Empirical checks of the assumptions used by exact-base.
@@ -74,6 +76,7 @@ A .agm input is compiled to a temporary .dat with the AGT compiler; the .agm is 
                 {
                     case "exact-base": RunExact(dat, options); break;
                     case "analytic": return RunAnalytic(dat, options) ? 0 : 3;
+                    case "feature": RunFeature(dat, options); break;
                     case "simulate": RunSimulate(dat, options); break;
                     case "profile": RunProfile(dat, options); break;
                     case "selftest": return RunSelfTest(dat, options) ? 0 : 3;
@@ -157,6 +160,49 @@ A .agm input is compiled to a temporary .dat with the AGT compiler; the .agm is 
 
         private static string Compare(double value, double? reference) =>
             reference is double x ? $"   reference {x:F12}  diff {value - x:+0.0e+00;-0.0e+00;0}" : "";
+
+        private static void RunFeature(byte[] dat, Options o)
+        {
+            if (o.Layout is null) throw new ArgumentException("feature: give the feature's layout with --layout name.");
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            void Log(string m) => Console.WriteLine($"    [{clock.Elapsed:mm\\:ss}] {m}");
+            var chain = new Analysis.Feature.FeatureChain(dat, o.Bet, o.Lines)
+            {
+                CachePath = o.Cache, Threads = o.Threads, VerifySamples = o.SamplesSpecified ? o.Samples : 10, Log = Log
+            };
+            Console.WriteLine($"=== Feature '{o.Layout}' as a Markov chain over engine states ===");
+            var entries = chain.FindEntries(o.Layout);
+            int sampled = entries.Sum(e => e.count);
+            double mixWin = 0, mixSpins = 0, mixVar = 0; double bet = 0;
+            var values = new List<(double f, double win)>();
+            foreach (var (entry, signature, count) in entries)
+            {
+                var r = chain.Run(entry);
+                bet = r.TotalBet;
+                double f = (double)count / sampled;
+                mixWin += f * r.ExpectedWin; mixSpins += f * r.ExpectedSpins; values.Add((f, r.ExpectedWin));
+                Console.WriteLine();
+                if (entries.Count > 1) Console.WriteLine($"  Entry state          : {signature}  ({count} of {sampled} sampled entries)");
+                Console.WriteLine($"  States (kernels)     : {r.Kernels}");
+                Console.WriteLine($"  Expected spins       : {r.ExpectedSpins:F10}");
+                Console.WriteLine($"  Expected win         : {r.ExpectedWin:F6} credits = {r.ExpectedWin / r.TotalBet:F10} x total bet");
+                Console.WriteLine($"      lines            : {r.LineWin / r.TotalBet:F10} x total bet");
+                Console.WriteLine($"      non-line         : {r.NonLineWin / r.TotalBet:F10} x total bet");
+                foreach (var (family, credits) in r.Breakdown.OrderByDescending(kv => kv.Value))
+                    if (credits != 0) Console.WriteLine($"        {family,-26}: {credits / r.TotalBet:F10}");
+                Console.WriteLine($"  Sub-feature entries  : {r.ExpectedExits:F10} per feature (their own value is not included)");
+            }
+            if (entries.Count > 1)
+            {
+                // The mix of entry states is sampled from random base games: its standard error from the multinomial counts.
+                foreach (var (f, w) in values) mixVar += f * (w - mixWin) * (w - mixWin);
+                double se = Math.Sqrt(mixVar / sampled);
+                Console.WriteLine();
+                Console.WriteLine($"  Mixed over entries   : {mixWin / bet:F6} x total bet per feature (+/- {se / bet:F6} from the sampled entry mix), {mixSpins:F4} spins");
+                Console.WriteLine("  note: each entry state's value is exact; the mix of entry states is estimated from random base games.");
+            }
+            Console.WriteLine($"  Elapsed              : {clock.Elapsed.TotalSeconds:F1} s");
+        }
 
         private static bool RunAnalytic(byte[] dat, Options o)
         {

@@ -22,6 +22,16 @@ public sealed class BaseSetup
 
     public static BaseSetup Read(GameHost host) => Read(host, null, null);
 
+    /// <summary>The same setup with more draws fixed (e.g. in-spin draws that do not depend on the stops).</summary>
+    public BaseSetup WithFixedDraws(IEnumerable<uint> values, IEnumerable<uint> ranges)
+    {
+        var copy = new BaseSetup { Model = Model, ScatterSymbols = ScatterSymbols, Ranges = Ranges };
+        copy.BetLines.AddRange(BetLines);
+        foreach (var kv in LineCells) copy.LineCells[kv.Key] = kv.Value;
+        copy.PrepareValues.AddRange(values); copy.PrepareRanges.AddRange(ranges);
+        return copy;
+    }
+
     /// <summary>
     /// Read the base game as prepared by the engine. With <paramref name="prepareValues"/> the draws made
     /// during Prepare (e.g. ReelGroupSet choices) are scripted, so a specific reel-strip scenario is read.

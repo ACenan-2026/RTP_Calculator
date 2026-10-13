@@ -30,6 +30,8 @@ public sealed class Options
     /// <summary>Cache file for class-count engine measurements (analytic mode); lets a long run resume.</summary>
     public string? Cache { get; private set; }
     public string? Filter { get; private set; }
+    /// <summary>Feature command: the layout of the feature to evaluate.</summary>
+    public string? Layout { get; private set; }
     public (int from, int count)? Range { get; private set; }
 
     public static Options Parse(IEnumerable<string> args)
@@ -71,6 +73,7 @@ public sealed class Options
                 case "--out": o.Out = Next(); break;
                 case "--cache": o.Cache = Next(); break;
                 case "--filter": o.Filter = Next(); break;
+                case "--layout": o.Layout = Next(); break;
                 case "--range":
                     var rg = Next().Split(':');
                     o.Range = (int.Parse(rg[0], CultureInfo.InvariantCulture), int.Parse(rg[1], CultureInfo.InvariantCulture));

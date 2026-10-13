@@ -44,6 +44,23 @@ public sealed class AnalyticBaseGame
     /// <summary>Optional cache file for class-count engine measurements (resumes an interrupted run).</summary>
     public string? CachePath { get; set; }
     public int ScenarioLimit { get; set; } = 64;
+    /// <summary>When the rule-based line models refuse a replacement, measure each reel with the engine (<see cref="ReelTransformLines"/>).</summary>
+    public bool AllowReelTransform { get; set; } = true;
+    /// <summary>
+    /// Analyse one spin from this game state (e.g. a feature state) instead of the base game. Every engine
+    /// instance is then started there (<see cref="GameHost.LoadAt"/>).
+    /// </summary>
+    public AgtEngine.Core.ReelGame.AGTReelGame? StartState { get; set; }
+    /// <summary>State mode: records the state each act leads to (filled into <see cref="Report.NextStates"/>).</summary>
+    public Feature.StateTracker? Tracker { get; set; }
+    /// <summary>State mode: free spins left set to this (so acts never end the feature); null keeps the state's count.</summary>
+    public int? StateFreeSpins { get; set; }
+
+    private GameHost NewHost(int seed, bool suppress = false, bool lenient = false)
+    {
+        if (StartState is not null) return GameHost.LoadAt(dat, betPerLine, lines, StartState, seed, StateFreeSpins, suppressExits: true);
+        return GameHost.Load(dat, betPerLine, lines, seed, suppressFeatureEntry: suppress, lenient: lenient);
+    }
     /// <summary>Compute line wins only (the non-line part is reported as skipped).</summary>
     public bool SkipNonLine { get; set; }
     /// <summary>Print progress of each stage.</summary>
@@ -96,6 +113,8 @@ public sealed class AnalyticBaseGame
         public TimeSpan VerifyTime { get; set; }
         /// <summary>Expected non-line credits per pay condition family (class-count model only).</summary>
         public Dictionary<string, double> NonLineBreakdown { get; } = new Dictionary<string, double>(StringComparer.Ordinal);
+        /// <summary>State mode: probability of each state (tracker id) after the act.</summary>
+        public Dictionary<int, double> NextStates { get; } = new Dictionary<int, double>();
         public double LineRtp => ExpectedLineWin / TotalBet;
         public double NonLineRtp => ExpectedNonLineWin / TotalBet;
     }
@@ -111,6 +130,10 @@ public sealed class AnalyticBaseGame
         public SpecialSymbolEvaluator? General;
         public ClassCountEvaluator? Classes;
         public WaysEvaluator? Ways;
+        public ReelTransformLines? Transform;
+        /// <summary>Line win taken from the cache (the reel measurements are not repeated, nor line checks).</summary>
+        public bool LinesCached;
+        public int Index;
         public double WaysWin;
         public FloatingModel Floating = null!;
         public NonLineRelevance? Relevance;
@@ -124,7 +147,7 @@ public sealed class AnalyticBaseGame
     {
         var report = new Report();
         bool suppress = TrySuppress();
-        var host = GameHost.Load(dat, betPerLine, lines, 21, suppressFeatureEntry: suppress);
+        var host = NewHost(21, suppress);
         var layout = host.Game.Layouts.Entry(host.BaseLayoutIndex).Value;
         report.TotalBet = host.TotalBet;
         var scan = ConstructScanner.Scan(host);
@@ -155,12 +178,22 @@ public sealed class AnalyticBaseGame
             sc.Catalog = ReplacementCatalog.Build(layout, model, scan, lineCells, lineEval, setup.ScatterSymbols);
             sc.Mystery = MysteryModel.Build(layout, model, sc.Catalog);
             report.Mystery = sc.Mystery.Description;
-            sc.Floating = FloatingModel.Build(layout, model, sc.Catalog, lineEval, sc.Mystery, lineCells);
-            if (sc.Floating.Active) report.Floating = sc.Floating.Description;
-            var blocking = sc.Catalog.Entries.Where(e => e.ActsOnLines && !sc.Mystery.Handled.Contains(e) && !sc.Floating.Handled.Contains(e)).ToList();
-            if (blocking.Count > 0)
-                throw new NotSupportedException($"Replacement {blocking[0]} can change symbols on paylines" +
-                                                (blocking.Count > 1 ? $" (+{blocking.Count - 1} more)" : "") + "; not supported analytically yet.");
+            string? ruleError = null;
+            try
+            {
+                sc.Floating = FloatingModel.Build(layout, model, sc.Catalog, lineEval, sc.Mystery, lineCells);
+                if (sc.Floating.Active) report.Floating = sc.Floating.Description;
+                var blocking = sc.Catalog.Entries.Where(e => e.ActsOnLines && !sc.Mystery.Handled.Contains(e) && !sc.Floating.Handled.Contains(e)).ToList();
+                if (blocking.Count > 0)
+                    throw new NotSupportedException($"Replacement {blocking[0]} can change symbols on paylines" +
+                                                    (blocking.Count > 1 ? $" (+{blocking.Count - 1} more)" : "") + "; not supported analytically yet.");
+            }
+            catch (NotSupportedException e) when (AllowReelTransform && setup.BetLines.Count > 0)
+            {
+                // The rule-based line models do not cover these replacements: let the engine measure each reel instead.
+                ruleError = e.Message;
+                sc.Floating = FloatingModel.None(model, lineEval, sc.Mystery);
+            }
 
             // ---- Ways (pattern) pays: counted with the lines ----
             var ways = new WaysEvaluator(layout, model, betPerLine, lines);
@@ -183,7 +216,28 @@ public sealed class AnalyticBaseGame
                 if (!lineCache.TryGetValue(signature, out double e)) lineCache[signature] = e = lineEval.ExpectedLineWin(dists);
                 return e;
             }
-            if (!sc.Floating.Active)
+            string? linesCache = CachePath is null ? null : CachePath + $".lines{sc.Index}";
+            if (ruleError is not null && linesCache is not null && File.Exists(linesCache))
+            {
+                sc.LineWin += double.Parse(File.ReadAllText(linesCache).Trim(), System.Globalization.CultureInfo.InvariantCulture);
+                sc.LinesCached = true;
+                report.Floating = "reel-transform model (line win from the cache)";
+                Log("lines: taken from the cache");
+            }
+            else if (ruleError is not null)
+            {
+                Log("lines: rule-based models do not apply (" + ruleError + "); measuring reels with the engine");
+                var busy = new HashSet<string>(sc.Catalog.Entries.SelectMany(e => e.Inputs), StringComparer.Ordinal);
+                var transform = new ReelTransformLines(host, setup, lineEval, busy) { Progress = Log };
+                transform.Calibrate();
+                sc.Transform = transform;
+                double transformWin = transform.ExpectedLineWin(Evaluate);
+                sc.LineWin += transformWin;
+                if (linesCache is not null) File.WriteAllText(linesCache, transformWin.ToString("R", System.Globalization.CultureInfo.InvariantCulture));
+                report.OracleActs += transform.Plays;
+                report.Floating = "reel-transform model: " + transform.Description + $", {transform.Checks} reel-locality checks";
+            }
+            else if (!sc.Floating.Active)
             {
                 foreach (int line in setup.BetLines)
                 {
@@ -200,7 +254,7 @@ public sealed class AnalyticBaseGame
                 // Condition on the driver reels: they decide the mystery outcome and which floating replacements fire.
                 Log($"floating: {sc.Floating.Description}; asking the engine which replacements fire");
                 sc.Floating.Progress = Log;
-                sc.Floating.Calibrate(dat, betPerLine, lines, setup, OraclePathLimit);
+                sc.Floating.Calibrate(dat, betPerLine, lines, setup, OraclePathLimit, (seed, suppress) => NewHost(seed, suppress));
                 Log($"floating: oracle done ({sc.Floating.OracleActs:N0} engine acts); computing lines");
                 report.OracleActs += sc.Floating.OracleActs;
                 var floatCache = new Dictionary<string, double>(StringComparer.Ordinal);
@@ -308,7 +362,7 @@ public sealed class AnalyticBaseGame
         sc.Relevance ??= NonLineRelevance.Build(host.Game, layout, host.LayoutName(host.BaseLayoutIndex), setup.Model, sc.Catalog, sc.Ways?.PatternConditions);
         report.NonLineRelevance = sc.Relevance.Description;
         var nonLineHost = sc.NonLineHost ??= LoadNonLineHost(layout, sc.Relevance);
-        if (preferCount && setup.ScatterSymbols.Count > 0)
+        if (preferCount && setup.ScatterSymbols.Count > 0 && StartState is null)
         {
             try
             {
@@ -326,6 +380,58 @@ public sealed class AnalyticBaseGame
             catch (NotSupportedException e) { if (!report.Notes.Contains("scatter-count model not used: " + e.Message)) report.Notes.Add("scatter-count model not used: " + e.Message); sc.Count = null; Log("scatter-count model not used"); }
         }
         var model = setup.Model; var relevance = sc.Relevance;
+        if (StartState is not null)
+        {
+            // Feature state: the general evaluator, recording the next state of every act. Within a reel the window
+            // order is tried first as irrelevant (fewer groups), checked by playing other stops of each group.
+            string? error = null;
+            foreach (bool sorted in new[] { true, false })
+            {
+                try
+                {
+                    Func<int, uint, string> key = sorted
+                        ? (r, p) => string.Join("|", relevance.Key(r, model.Reels[r].WindowSymbols[p]).Split('|').OrderBy(x => x, StringComparer.Ordinal))
+                        : (r, p) => relevance.Key(r, model.Reels[r].WindowSymbols[p]);
+                    var g = new SpecialSymbolEvaluator(model, key, nonLineHost, setup.PrepareValues, setup.PrepareRanges, OraclePathLimit, Math.Max(ConfigurationLimit, 100_000))
+                    {
+                        Progress = Log, Threads = Threads, HostFactory = () => LoadNonLineHost(layout, relevance),
+                        CachePath = CachePath is null ? null : CachePath + (sorted ? ".sorted" : ".general")
+                    };
+                    // Extra metrics: credits per pay-condition family, then the next-state indicator.
+                    var families = new List<string>(); var familyOf = new Dictionary<string, int>(StringComparer.Ordinal);
+                    foreach (var pc in layout.PayConditions)
+                    {
+                        if (!(pc.Value.Scatter || pc.Value.Located || pc.Value.CombinedWin)) continue;
+                        string f = System.Text.RegularExpressions.Regex.Replace(pc.Key, "_[0-9]+$", "");
+                        int fi = families.IndexOf(f); if (fi < 0) { fi = families.Count; families.Add(f); }
+                        familyOf[pc.Key] = fi;
+                    }
+                    int bi = nonLineHost.BaseLayoutIndex;
+                    g.Extra = h =>
+                    {
+                        var states = Tracker?.Indicator(h) ?? Array.Empty<double>();
+                        var v = new double[families.Count + states.Length];
+                        var lay = h.Game.Layouts.Entry(bi).Value;
+                        foreach (var list in new[] { lay.WinningLocatedPayconditions, lay.WinningScatteredPayconditions, lay.CombinedWinPayconditions })
+                            foreach (var w in list) if (familyOf.TryGetValue(w.PayconditionName.CString, out int fi)) v[fi] += w.WonCredits;
+                        Array.Copy(states, 0, v, families.Count, states.Length);
+                        return v;
+                    };
+                    Log($"state-mode general evaluator ({(sorted ? "window order ignored" : "window order kept")}): {g.Configurations:N0} engine configurations");
+                    g.Run(groupChecks: sorted ? 40 : 0);
+                    sc.General = g;
+                    sc.NonLineWin = g.ExpectedWin; sc.Trigger = g.TriggerProbability;
+                    for (int i = 0; i < families.Count; i++)
+                        if (g.ExpectedExtra[i] != 0) report.NonLineBreakdown[families[i]] = (report.NonLineBreakdown.TryGetValue(families[i], out var b) ? b : 0) + sc.Weight * g.ExpectedExtra[i];
+                    for (int i = families.Count; i < g.ExpectedExtra.Length; i++)
+                        if (g.ExpectedExtra[i] != 0) report.NextStates[i - families.Count] = (report.NextStates.TryGetValue(i - families.Count, out var v) ? v : 0) + sc.Weight * g.ExpectedExtra[i];
+                    report.OracleActs += g.Acts; report.OracleConfigurations += g.Configurations;
+                    return;
+                }
+                catch (NotSupportedException e) { error = (error is null ? "" : error + " / ") + e.Message; Log("  not used: " + e.Message); }
+            }
+            throw new NotSupportedException(error);
+        }
         // Two evaluators: the general one (every relevant-symbol arrangement) and the class-count one (counts on
         // interchangeable reels). The cheaper one that applies is used.
         SpecialSymbolEvaluator? general = null; string? generalError = null;
@@ -375,8 +481,8 @@ public sealed class AnalyticBaseGame
     private GameHost LoadNonLineHost(AGTLayout layout, NonLineRelevance relevance)
     {
         GameHost h;
-        try { h = GameHost.Load(dat, betPerLine, lines, 51, suppressFeatureEntry: true); }
-        catch (NotSupportedException) { h = GameHost.Load(dat, betPerLine, lines, 51); }
+        try { h = NewHost(51, suppress: true); }
+        catch (NotSupportedException) { h = NewHost(51); }
         var refs = relevance.Irrelevant.Select(e => new EngineSurgery.ReplacementRef(e.Info.Trigger,
             Array.IndexOf(layout.Replacements[e.Info.Trigger], e.Replacement), e.Info.Kind == "mapped")).ToList();
         EngineSurgery.SwitchOff(h, refs);
@@ -427,7 +533,7 @@ public sealed class AnalyticBaseGame
             double weight = 1;
             for (int d = 0; d < setup.PrepareRanges.Count; d++)
                 weight *= (double)(partition.NextCellStart(setup.PrepareRanges[d], setup.PrepareValues[d]) - setup.PrepareValues[d]) / setup.PrepareRanges[d];
-            result.Add(new Scenario { Setup = setup, Weight = weight });
+            result.Add(new Scenario { Setup = setup, Weight = weight, Index = result.Count });
             if (result.Count > ScenarioLimit) throw new NotSupportedException($"More than {ScenarioLimit} spin-preparation scenarios (reel group choices).");
             int depth = setup.PrepareRanges.Count - 1;
             while (depth >= 0 && partition.NextCellStart(setup.PrepareRanges[depth], setup.PrepareValues[depth]) >= setup.PrepareRanges[depth]) depth--;
@@ -435,6 +541,86 @@ public sealed class AnalyticBaseGame
             values = setup.PrepareValues.Take(depth).ToList(); ranges = setup.PrepareRanges.Take(depth).ToList();
             values.Add(partition.NextCellStart(setup.PrepareRanges[depth], setup.PrepareValues[depth])); ranges.Add(setup.PrepareRanges[depth]);
         }
+        if (StartState is not null) result = ExpandGlobalDraws(host, partition, result);
+        return result;
+    }
+
+    /// <summary>
+    /// Feature states: in-spin draws whose ranges do not depend on the reel stops (e.g. which columns become wild
+    /// this spin) are made part of the scenario. Their outcomes are grouped by the screen they give on a fixed
+    /// stop vector; a group is only used when random spins give identical results for its members.
+    /// Without this every configuration would multiply them out.
+    /// </summary>
+    private List<Scenario> ExpandGlobalDraws(GameHost host, DrawPartition partition, List<Scenario> scenarios)
+    {
+        var result = new List<Scenario>();
+        var rng = new System.Random(17);
+        string Play(List<uint> values, List<uint> ranges, uint[] stops, bool randomTail, int seed, out List<uint> drawn)
+        {
+            host.EnsureBase(true);
+            host.Agent.Reseed(seed);
+            host.Agent.BeginScripted(values, ranges, values.Count, randomTail);
+            host.BeginAccounting();
+            host.Session.Prepare(betPerLine, lines);
+            int played = (int)host.Game.CurrentLayoutIndex;
+            host.Session.Complete(stops);
+            var res = host.EndAccounting(played);
+            drawn = new List<uint>(host.Agent.Ranges);
+            var layout = host.Game.Layouts.Entry(host.BaseLayoutIndex).Value;
+            return res.Credited[host.BaseLayoutIndex] + " " + host.TransitionSignature() + " " +
+                   string.Join("|", scenarios[0].Setup.Model.Reels.SelectMany(r => r.Coordinates).Select(c => layout.SymbolAtCoordinate(c).Name.CString));
+        }
+        foreach (var sc in scenarios)
+        {
+            var model = sc.Setup.Model;
+            int fixedCount = sc.Setup.PrepareValues.Count;
+            List<uint>? common = null;
+            for (int t = 0; t < 40; t++)
+            {
+                var stops = model.Reels.Select(r => r.Stops[rng.Next(r.Stops.Count)].stop).ToArray();
+                Play(sc.Setup.PrepareValues, sc.Setup.PrepareRanges, stops, false, 0, out var drawn);
+                var tail = drawn.Skip(fixedCount).ToList();
+                if (common is null) common = tail;
+                else { int n = 0; while (n < common.Count && n < tail.Count && common[n] == tail[n]) n++; common = common.Take(n).ToList(); }
+            }
+            int k = common!.Count;
+            if (k == 0) { result.Add(sc); continue; }
+            var baseline = model.Reels.Select(r => r.Stops[0].stop).ToArray();
+            var leaves = new List<(List<uint> v, List<uint> r, double p)>();
+            void Walk(List<uint> v, List<uint> r, double p)
+            {
+                if (v.Count == fixedCount + k) { leaves.Add((v, r, p)); if (leaves.Count > 20_000) throw new NotSupportedException("More than 20,000 outcomes of the stop-independent in-spin draws."); return; }
+                Play(v, r, baseline, false, 0, out var drawn);
+                uint range = drawn[v.Count];
+                var cells = partition.Cells(range);
+                for (int c = 0; c < cells.Length; c++)
+                {
+                    uint end = c + 1 < cells.Length ? cells[c + 1] : range;
+                    Walk(new List<uint>(v) { cells[c] }, new List<uint>(r) { range }, p * (end - cells[c]) / range);
+                }
+            }
+            Walk(new List<uint>(sc.Setup.PrepareValues), new List<uint>(sc.Setup.PrepareRanges), 1.0);
+            var groups = new Dictionary<string, List<(List<uint> v, List<uint> r, double p)>>(StringComparer.Ordinal);
+            foreach (var leaf in leaves)
+            {
+                string key = Play(leaf.v, leaf.r, baseline, false, 0, out _);
+                if (!groups.TryGetValue(key, out var list)) groups[key] = list = new List<(List<uint>, List<uint>, double)>();
+                list.Add(leaf);
+            }
+            var checkStops = Enumerable.Range(0, 6).Select(_ => model.Reels.Select(r => r.Stops[rng.Next(r.Stops.Count)].stop).ToArray()).ToList();
+            foreach (var members in groups.Values)
+            {
+                // Members of a group must play alike: compare the first with each other one on random spins.
+                var rep = members[0];
+                var expected = checkStops.Select((st, i) => Play(rep.v, rep.r, st, true, 1000 + i, out _)).ToList();
+                bool alike = members.Skip(1).Take(3).All(m => checkStops.Select((st, i) => Play(m.v, m.r, st, true, 1000 + i, out _)).SequenceEqual(expected));
+                var parts = alike ? new[] { (rep.v, rep.r, members.Sum(m => m.p)) } : members.Select(m => (m.v, m.r, m.p)).ToArray();
+                foreach (var (v, r, p) in parts)
+                    result.Add(new Scenario { Setup = sc.Setup.WithFixedDraws(v, r), Weight = sc.Weight * p, Index = result.Count });
+            }
+            Log($"state scenarios: {k} stop-independent in-spin draw(s), {leaves.Count} outcome(s) in {groups.Count} group(s)");
+        }
+        if (result.Count > ScenarioLimit * 4) throw new NotSupportedException($"{result.Count} scenarios after the stop-independent in-spin draws; too many.");
         return result;
     }
 
@@ -446,9 +632,10 @@ public sealed class AnalyticBaseGame
     {
         var setup = scenarios[0].Setup;
         GameHost suppressed;
-        try { suppressed = GameHost.Load(dat, betPerLine, lines, 61, suppressFeatureEntry: true); }
+        if (StartState is not null) return; // feature states: transitions are measured directly
+        try { suppressed = NewHost(61, suppress: true); }
         catch (NotSupportedException) { return; } // not used: triggers are read from the real engine
-        var real = GameHost.Load(dat, betPerLine, lines, 61);
+        var real = NewHost(61);
         var rng = new System.Random(VerifySeed + 1);
         int n = FeatureEntryChecks, disagree = 0, entries = 0;
         for (int i = 0; i < n; i++)
@@ -500,12 +687,13 @@ public sealed class AnalyticBaseGame
 
     private GameHost LoadSampler(GameHost fallback)
     {
-        try { return GameHost.Load(dat, betPerLine, lines, 41, suppressFeatureEntry: true, lenient: true); }
+        try { return NewHost(41, suppress: true, lenient: true); }
         catch (NotSupportedException) { return fallback; }
     }
 
     private bool TrySuppress()
     {
+        if (StartState is not null) return false;
         try { GameHost.Load(dat, betPerLine, lines, 3, suppressFeatureEntry: true); return true; }
         catch (NotSupportedException) { return false; }
     }
@@ -538,7 +726,7 @@ public sealed class AnalyticBaseGame
             if (i % 2 == 1 && scatterLike.Count > 0)
                 for (int r = 0; r < stops.Length; r++)
                 {
-                    var with = Enumerable.Range(0, (int)model.Reels[r].Range).Where(p => model.Reels[r].Windows[p].Any(scatterLike.Contains)).ToList();
+                    var with = model.Reels[r].Stops.Select(x => (int)x.stop).Where(p => model.Reels[r].Windows[p].Any(scatterLike.Contains)).ToList();
                     if (with.Count > 0 && rng.NextDouble() < 0.6) stops[r] = (uint)with[rng.Next(with.Count)];
                 }
             int line = setup.BetLines.Count > 0 ? setup.BetLines[rng.Next(setup.BetLines.Count)] : -1;
@@ -550,7 +738,7 @@ public sealed class AnalyticBaseGame
                 if (inputs.Count > 0)
                     foreach (var (reel, window) in setup.LineCells[line])
                     {
-                        var with = Enumerable.Range(0, (int)model.Reels[reel].Range).Where(p => inputs.Contains(model.Reels[reel].Windows[p][window])).ToList();
+                        var with = model.Reels[reel].Stops.Select(x => (int)x.stop).Where(p => inputs.Contains(model.Reels[reel].Windows[p][window])).ToList();
                         if (with.Count > 0 && rng.NextDouble() < 0.7) stops[reel] = (uint)with[rng.Next(with.Count)];
                     }
             }
@@ -565,7 +753,7 @@ public sealed class AnalyticBaseGame
                     if (line >= 0) engineLine += w * h.LineWin(line);
                     engineWays += w * h.AllPatternWins();
                     engineNonLine += w * ((double)res.Credited[baseIndex] - h.AllLineWins());
-                    bool t = h.FeatureEntrySuppressed ? h.FeatureEntryTriggered() : res.LeftBase;
+                    bool t = h.EntryTriggered(res);
                     if (t) engineTrigger += w;
                 });
             }
@@ -586,7 +774,7 @@ public sealed class AnalyticBaseGame
                     sampler.Session.Complete(stops);
                     var res = sampler.EndAccounting(played);
                     double lw = line >= 0 ? sampler.LineWin(line) : 0, ow = (double)res.Credited[baseIndex] - sampler.AllLineWins();
-                    bool t = sampler.FeatureEntrySuppressed ? sampler.FeatureEntryTriggered() : res.LeftBase;
+                    bool t = sampler.EntryTriggered(res);
                     double aw = sampler.AllPatternWins(); a1 += aw; a2 += aw * aw;
                     l1 += lw; l2 += lw * lw; o1 += ow; o2 += ow * ow; if (t) t1++;
                 }
@@ -600,13 +788,15 @@ public sealed class AnalyticBaseGame
             if (Verbose && (i < 5 || i % 10 == 0)) Log($"check {i + 1}/{VerifySamples}: {(sampled ? "sampled" : "exact")}");
             bool Agree(double engine, double model, double se) => sampled ? Math.Abs(engine - model) <= 4 * se + 1e-9 : Same(engine, model);
 
-            if (line >= 0)
+            if (line >= 0 && !sc.LinesCached)
             {
                 var outcome = sc.Mystery.OutcomeFor(model, stops);
                 var cells = setup.LineCells[line];
                 var cellDists = cells.Select(c => sc.Mystery.Effective(c.reel, c.window, model.Reels[c.reel].WindowSymbols[stops[c.reel]][c.window], outcome)).ToList();
                 double modelLine = 0;
-                if (sc.Floating.Active)
+                if (sc.Transform is not null)
+                    modelLine = sc.Transform.PredictLine(line, stops, d => lineEval.ExpectedLineWin(d));
+                else if (sc.Floating.Active)
                     foreach (var (pf, mask) in sc.Floating.FiringFor(stops))
                         modelLine += pf * sc.Floating.ExpectedLineWin(cells, cellDists, mask, d => lineEval.ExpectedLineWin(d), sc.Floating.ScreenEligible(stops, mask, outcome));
                 else modelLine = lineEval.ExpectedLineWin(cellDists);

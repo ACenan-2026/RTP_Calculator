@@ -34,23 +34,63 @@ public sealed class ReelModel
                 Hidden = reel.Hidden,
                 Weighted = reel.Symbols.ExtendedSymbolsPresent,
                 Coordinates = Enumerable.Range(0, windows).Select(w => reel.Graph.Coordinate((uint)w)).ToArray(),
-                Windows = new string[range][],
-                WindowSymbols = new AgtEngine.Core.Graphic.AGTSymbol[range][]
             };
-            for (uint p = 0; p < range; p++)
+            // What a stop shows depends only on the strip position it maps to. An unweighted reel maps stop p to
+            // position p; a weighted reel maps a run of stop values to each position (weights can total 10^8, so
+            // the model keeps one entry per position, never one per stop value).
+            int positions = info.Weighted ? (int)stripLength : (int)range;
+            if (info.Weighted && reel.Symbols.NumSymbolsBasedOnExtension != range)
+                throw new NotSupportedException($"Weighted reel '{entry.Key}': draw range {range} differs from its total weight {reel.Symbols.NumSymbolsBasedOnExtension}.");
+            var windowNames = new string[positions][];
+            var windowSymbols = new AgtEngine.Core.Graphic.AGTSymbol[positions][];
+            for (int position = 0; position < positions; position++)
             {
-                uint position = reel.Symbols.ActualSymbolIndexInExtendedSet(p);
                 var cells = new string[windows];
                 var symbols = new AgtEngine.Core.Graphic.AGTSymbol[windows];
                 for (int w = 0; w < windows; w++)
                 {
                     // Copies, so later engine activity cannot change the model.
-                    symbols[w] = new AgtEngine.Core.Graphic.AGTSymbol(reel.Symbols[unchecked(position + (uint)w) % stripLength]);
+                    symbols[w] = new AgtEngine.Core.Graphic.AGTSymbol(reel.Symbols[unchecked((uint)position + (uint)w) % stripLength]);
                     cells[w] = symbols[w].Name.CString;
                 }
-                info.Windows[p] = cells;
-                info.WindowSymbols[p] = symbols;
+                windowNames[position] = cells;
+                windowSymbols[position] = symbols;
             }
+            var stops = new List<(uint stop, long count)>(positions);
+            uint[] firstStop;
+            if (!info.Weighted)
+            {
+                for (uint p = 0; p < range; p++)
+                {
+                    if (reel.Symbols.ActualSymbolIndexInExtendedSet(p) != p)
+                        throw new NotSupportedException($"Reel '{entry.Key}': stop {p} does not map to strip position {p}.");
+                    stops.Add((p, 1));
+                }
+                firstStop = Array.Empty<uint>();
+            }
+            else
+            {
+                // Cumulative weights, as AGTSymbolSet.ActualSymbolIndexInExtendedSet maps a draw to a position.
+                firstStop = new uint[positions];
+                ulong sum = 0;
+                for (int position = 0; position < positions; position++)
+                {
+                    uint weight = reel.Symbols[(uint)position].Statistics.Frequency;
+                    firstStop[position] = (uint)sum;
+                    if (weight > 0) stops.Add(((uint)sum, weight));
+                    sum += weight;
+                }
+                // Check the mapping against the engine at both ends of every position's run of stop values.
+                for (int position = 0; position < positions; position++)
+                {
+                    uint weight = reel.Symbols[(uint)position].Statistics.Frequency;
+                    if (weight == 0) continue;
+                    if (reel.Symbols.ActualSymbolIndexInExtendedSet(firstStop[position]) != position ||
+                        reel.Symbols.ActualSymbolIndexInExtendedSet(firstStop[position] + weight - 1) != position)
+                        throw new NotSupportedException($"Weighted reel '{entry.Key}': stop-to-position mapping differs from the engine's.");
+                }
+            }
+            info.SetStops(stops, windowNames, windowSymbols, firstStop);
             model.Reels.Add(info);
         }
         return model;
@@ -78,10 +118,38 @@ public sealed class ReelInfo
     public bool Hidden { get; set; }
     public bool Weighted { get; set; }
     public AGTCoordinate[] Coordinates { get; set; } = Array.Empty<AGTCoordinate>();
-    /// <summary>Windows[stop][windowIndex] = symbol name shown before any replacement.</summary>
-    public string[][] Windows { get; set; } = Array.Empty<string[]>();
+    /// <summary>Windows[stop][windowIndex] = symbol name shown before any replacement (any stop value in [0, Range)).</summary>
+    public StopTable<string[]> Windows { get; private set; } = null!;
     /// <summary>WindowSymbols[stop][windowIndex] = the engine's symbol object (with qualifiers such as wild).</summary>
-    public AgtEngine.Core.Graphic.AGTSymbol[][] WindowSymbols { get; set; } = Array.Empty<AgtEngine.Core.Graphic.AGTSymbol[]>();
+    public StopTable<AgtEngine.Core.Graphic.AGTSymbol[]> WindowSymbols { get; private set; } = null!;
+    /// <summary>
+    /// Distinct stops with the number of stop values they stand for: every stop with count 1 on an unweighted
+    /// reel, one stop per strip position (count = its weight) on a weighted reel. Loops over a reel's outcomes
+    /// use this, weighting each entry by count / Range.
+    /// </summary>
+    public IReadOnlyList<(uint stop, long count)> Stops { get; private set; } = Array.Empty<(uint, long)>();
+
+    internal void SetStops(List<(uint stop, long count)> stops, string[][] names, AgtEngine.Core.Graphic.AGTSymbol[][] symbols, uint[] firstStop)
+    {
+        Stops = stops;
+        Func<uint, int> position = Weighted
+            ? stop => { int k = Array.BinarySearch(firstStop, stop); if (k < 0) k = ~k - 1; while (k + 1 < firstStop.Length && firstStop[k + 1] == stop) k++; return k; }
+            : stop => (int)stop;
+        Windows = new StopTable<string[]>(names, position);
+        WindowSymbols = new StopTable<AgtEngine.Core.Graphic.AGTSymbol[]>(symbols, position);
+    }
+}
+
+/// <summary>Per-stop lookup backed by one entry per strip position; enumerating it gives each position once.</summary>
+public sealed class StopTable<T> : IEnumerable<T>
+{
+    private readonly T[] byPosition;
+    private readonly Func<uint, int> position;
+    public StopTable(T[] byPosition, Func<uint, int> position) { this.byPosition = byPosition; this.position = position; }
+    public T this[uint stop] => byPosition[position(stop)];
+    public T this[int stop] => byPosition[position((uint)stop)];
+    public IEnumerator<T> GetEnumerator() => ((IEnumerable<T>)byPosition).GetEnumerator();
+    System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => byPosition.GetEnumerator();
 }
 
 /// <summary>A set of reel stops that are equivalent for the quantity being computed.</summary>
@@ -104,18 +172,18 @@ public static class StopGrouping
         var groups = new Dictionary<string, StopGroup>(StringComparer.Ordinal);
         var bestScore = new Dictionary<string, int>(StringComparer.Ordinal);
         var order = new List<string>();
-        for (uint p = 0; p < reel.Range; p++)
+        foreach (var (p, count) in reel.Stops)
         {
             var window = reel.Windows[p];
             string k = key(window);
             int s = score(window);
             if (!groups.TryGetValue(k, out var g))
             {
-                groups[k] = new StopGroup(k, p, 1); bestScore[k] = s; order.Add(k);
+                groups[k] = new StopGroup(k, p, count); bestScore[k] = s; order.Add(k);
             }
             else
             {
-                g.Count++;
+                g.Count += count;
                 if (s < bestScore[k]) { bestScore[k] = s; g.Representative = p; }
             }
         }

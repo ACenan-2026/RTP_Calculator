@@ -46,7 +46,7 @@ public sealed class ReplacementCatalog
             for (int w = 0; w < model.Reels[r].Coordinates.Length; w++)
             {
                 var set = new HashSet<string>(StringComparer.Ordinal);
-                foreach (var window in model.Reels[r].WindowSymbols) { set.Add(window[w].Name.CString); c.Remember(window[w]); }
+                foreach (var window in model.Reels[r].Stops.Select(x => model.Reels[r].WindowSymbols[x.stop])) { set.Add(window[w].Name.CString); c.Remember(window[w]); }
                 c.Possible[(r, w)] = set;
             }
 

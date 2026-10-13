@@ -70,6 +70,9 @@ public sealed class FloatingModel
 
     private FloatingModel(ReelModel model, LineEvaluator lines, MysteryModel mystery) { this.model = model; this.lines = lines; this.mystery = mystery; }
 
+    /// <summary>A model with no floating rules (lines are computed another way).</summary>
+    public static FloatingModel None(ReelModel model, LineEvaluator lines, MysteryModel mystery) => new FloatingModel(model, lines, mystery);
+
     public static FloatingModel Build(AGTLayout layout, ReelModel model, ReplacementCatalog catalog, LineEvaluator lineEval,
         MysteryModel mystery, HashSet<(int, int)> lineCells)
     {
@@ -244,13 +247,14 @@ public sealed class FloatingModel
     /// Ask the engine, for every driver configuration, which of these replacements fire (with probabilities if
     /// in-spin draws decide). Uses a separate engine instance in which the replacements are switched off.
     /// </summary>
-    public void Calibrate(byte[] dat, uint betPerLine, uint linesBet, BaseSetup setup, long pathLimit)
+    public void Calibrate(byte[] dat, uint betPerLine, uint linesBet, BaseSetup setup, long pathLimit, Func<int, bool, GameHost>? hostFactory = null)
     {
         if (!Active) return;
         // Feature entry does not matter here (every path is restored), so suppress it only where possible.
         GameHost oracle;
-        try { oracle = GameHost.Load(dat, betPerLine, linesBet, 31, suppressFeatureEntry: true); }
-        catch (NotSupportedException) { oracle = GameHost.Load(dat, betPerLine, linesBet, 31); }
+        hostFactory ??= (seed, suppress) => GameHost.Load(dat, betPerLine, linesBet, seed, suppressFeatureEntry: suppress);
+        try { oracle = hostFactory(31, true); }
+        catch (NotSupportedException) { oracle = hostFactory(31, false); }
         int baseIndex = oracle.BaseLayoutIndex;
         // Switch off the handled replacements, and those that cannot reach a trigger cell, in the oracle.
         EngineSurgery.SwitchOff(oracle, neutralise.Select(n => new EngineSurgery.ReplacementRef(n.trigger, n.index, n.mapped)));
@@ -508,7 +512,7 @@ public sealed class FloatingModel
             var windows = rule.Targets.Where(t => t.Item1 == r).Select(t => t.Item2).OrderBy(w => w).ToList();
             int li = lineIndexOf(r);
             var groups = new Dictionary<int, (long count, Dictionary<string, (long c, AGTSymbol s)> line)>();
-            for (uint p = 0; p < reel.Range; p++)
+            foreach (var (p, count) in reel.Stops)
             {
                 int bits = 0;
                 for (int i = 0; i < windows.Count; i++)
@@ -523,9 +527,9 @@ public sealed class FloatingModel
                 {
                     var eff = mystery.Effective(r, cells[li].window, reel.WindowSymbols[p][cells[li].window], outcome)[0].s;
                     string n = eff.Name.CString;
-                    lineMap[n] = lineMap.TryGetValue(n, out var x) ? (x.c + 1, x.s) : (1, eff);
+                    lineMap[n] = lineMap.TryGetValue(n, out var x) ? (x.c + count, x.s) : (count, eff);
                 }
-                groups[bits] = (g.count + 1, lineMap);
+                groups[bits] = (g.count + count, lineMap);
             }
             perReel.Add(groups.Select(kv => (kv.Key, (double)kv.Value.count / reel.Range,
                 li < 0 ? null : kv.Value.line.Values.Select(v => ((double)v.c / kv.Value.count, v.s)).ToList())).ToList());

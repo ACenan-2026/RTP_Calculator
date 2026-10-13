@@ -30,7 +30,7 @@ public sealed class SelfTest
             var after = BaseSetup.Read(host);
             int diffs = 0;
             for (int r = 0; r < setup.Model.Reels.Count; r++)
-                for (int p = 0; p < setup.Model.Reels[r].Range; p++)
+                foreach (var (p, _) in setup.Model.Reels[r].Stops)
                     if (!setup.Model.Reels[r].Windows[p].SequenceEqual(after.Model.Reels[r].Windows[p])) diffs++;
             ok &= Report("A", "reel strips are unchanged after 2,000 played games", diffs == 0, $"{diffs} differing stop windows");
         }
@@ -177,7 +177,7 @@ public sealed class SelfTest
     {
         string k = key(reel.Windows[stop]);
         var candidates = new List<uint>();
-        for (uint p = 0; p < reel.Range; p++) if (p != stop && key(reel.Windows[p]) == k) candidates.Add(p);
+        foreach (var (p, _) in reel.Stops) if (p != stop && key(reel.Windows[p]) == k) candidates.Add(p);
         if (candidates.Count == 0) { other = stop; return false; }
         other = candidates[rng.Next(candidates.Count)];
         return true;

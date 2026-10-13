@@ -59,9 +59,10 @@ RTP_Calculator analytic "...\LaughingDragon.dat" --lines 50 --samples 200 --ref-
 | After floating replacements | 51 + 8 lines-only | 47 | 0 |
 | After non-line relevance | 58 + 14 lines-only | 34 | 0 |
 | After the class-count model, factorised picks | 64 + 11 lines-only | 31 | 0 |
-| Current (ways evaluator) | **68** + 7 lines-only | 31 | **0** |
+| After the ways evaluator | 68 + 7 lines-only | 31 | 0 |
+| Current (weighted reels stored per position) | **69** + 7 lines-only | 31 | **0** |
 
-All 107 distinct games were run; CoinKingdomAztec timed out in the sandbox and is included under "Not supported".
+All 107 distinct games were run.
 
 What changed between the two runs:
 
@@ -180,6 +181,8 @@ Ways pays (`PatternWin`) are computed with the lines, following the engine's rul
 
 All four pass 30–40 checks against the full engine. They were previously listed as lines-only with a line RTP of 0: they have no paylines, so their whole base win was missing.
 
+**Coin Kingdom Aztec** (ways, 16 reel-group scenarios) used to run out of memory. Its hidden feature-selector reel is weighted: 8 symbols whose weights add up to 100,000,000. The reel model stored one entry per possible stop value, about 10 GB. It now keeps one entry per strip position, with that position's weight (`ReelInfo.Stops`), and maps any stop value to its position for lookups. The mapping is checked against the engine's own at both ends of every position's run of stop values. Result: ways RTP 0.355858, trigger 1 in 50.03, in 26 s; simulated paid spin 0.3549 ± 0.0022 and 1 in 49.58 (400k games).
+
 **A correction to the in-spin factorisation.** Dragons Delight showed that one shortcut was unsafe. For a single draw, the tool reused the contribution of later draws from its first outcome whenever the later draws looked the same. In Dragons Delight the later trigger draw depends on which feature symbols the earlier picks produced, and the 2 random checks missed it (one screen gave a trigger of 1 in 43.6 instead of the correct 1 in 42.9). That shortcut is removed. Single draws are now always multiplied out. The run-level version checks every reused combination when there are 8 or fewer, and 8 random ones otherwise. It also tries every possible unit length for repeated picks (a symbol pick and a position pick can share a range), and checks every companion value at two settings. On the test screens the results now equal the full enumeration (e.g. 0.0252072582716 with 617 engine plays instead of 233,280). Galaxy Gold's figures are unchanged, but its configurations take about 3 times as many plays.
 
 Remaining blockers, and what would fix each:
@@ -194,7 +197,41 @@ Remaining blockers, and what would fix each:
 | 2 | Payline cells on a column with no reel (SuperCrystal7s, SuperLantern8s) | Investigate |
 | 1 | Chained mystery source (RocketFrenzyDiner) | Case by case |
 | 1 | Random-per-cell replacement on paylines with a conditional trigger (UltraShotTiger) | Condition on the trigger |
-| 1 | CoinKingdomAztec: a ways game with 91 reels in reel groups; the process runs out of memory in the sandbox before the analysis starts | Investigate |
+
+## Features as Markov chains (`feature`, experimental)
+
+`RTP_Calculator feature <game> --layout <feature layout> [--cache file] [--threads N]` gives the expected value of one feature, exactly where it can.
+
+- **States.** A state is what the engine carries between spins: layout, free spins left, strategy bookkeeping, each reel's symbol set (features keep counters such as a wild count on hidden reels), and changes a win has queued for the next spin (`GameHost.StateSignature`).
+- **One spin per state ("kernel").** The analytic base-game machinery runs started in that state (`GameHost.LoadAt`, `AnalyticBaseGame.StartState`): lines, non-line pays, and the distribution of the next state. Kernels are keyed without the free-spin count; a spin is assumed to play the same whatever the count, and the count's change (a spin used, a retrigger) is part of the transition.
+- **Values.** Expected visits to each (state, spins left) are propagated forward from the entry state, so unbounded retriggers work. Totals are visits × kernel values.
+- **Sub-features** entered from the feature (e.g. Hold & Spin from free games) are switched off in the kernels. Their expected number of entries is reported, and play continues from the state they return to; their own value is not included.
+- **Entry state.** Found by playing random base games (2,000 entries). If the feature can start in more than one state, each is evaluated exactly and the mix is weighted by the sampled frequencies, with a standard error.
+- **Lines inside features** use a new reel-transform model when replacements defeat the rule-based ones (`ReelTransformLines`). The engine measures what each reel ends up showing for every stop and every outcome of the stop-independent draws (e.g. which columns turn wild); a check confirms that other reels don't change it.
+
+Engine details found on the way, all handled and checked:
+
+- Copying a game state into another engine instance keeps the source's random-number source. It is rebound to the new instance; otherwise draws bypass the enumerator.
+- The engine's copy constructor resets the free-spin count. `Assign` is used after it.
+- A win's reel symbol-set change is queued and only applied after the next spin's stops are set (Galaxy Gold's wild counter reads the old hidden symbol for one more spin). Queued changes are part of the state and must not be applied early. Applying them early was tried, and the check against the real engine rejected it.
+- `RestoreLegacyState` returns -1 on success.
+- **Speed.** Most spins are undone by putting reel sets and queued changes back instead of a full restore (about 10 ms each). Every kernel checks this against full restores on 60 random spins.
+
+Results (per feature, in total bets):
+
+| Game | Chain (exact per state) | Simulation of the feature | Kernels | Time |
+|---|---|---|---|---|
+| Arabian Rose (8 free games, retriggers upgrade the reel sets) | 43.4224, 10.5353 spins | 43.67 ± 0.59, 10.54 spins (9,000 features) | 7 | 18 s |
+| Cougar Cash (10 free games, +5 retriggers) | 41.3587, 10.9917 spins | 42.55 ± 0.83, 11.006 ± 0.027 spins (8,000 features) | 1 | 3 s |
+| Galaxy Gold free games (wild columns) | first state: wild-count distribution after spin 1 = 0.6124383518 / 0.3170 / 0.0640 / …, matching the sheet's 0.6124383517630995 | — | ~20 | hours here (see below) |
+
+Limits:
+
+- **Galaxy Gold free games** run, but slowly. Wilds expand only from a particular window position, so the order within a reel matters, and states with wild columns need 33,614 configurations for each column choice. Expect hours on many cores. Grouping by what each condition actually reads would cut this; not done yet.
+- **Laughing Dragon Lucky Break** is refused: the ring placements give more than 20,000 stop-independent draw outcomes per spin.
+- **Desert Hawk** is refused: the feature's non-line part is too large for the general evaluator.
+- Hold & Spin style features (coins held across spins) are not attempted; their state includes every held coin.
+- These are the reasons for the recommendation to simulate features from their exact entry states, and to keep the exact chain for small features and as a cross-check.
 
 ## How it works (engine-driven exact mode)
 
@@ -277,4 +314,5 @@ That leads to four conclusions:
 | `Analysis/MonteCarlo.cs`, `DrawProfiler.cs` | Simulation cross-check and feasibility profile |
 | `Analysis/Analytic/*.cs` | Analytic (reel-design) evaluators: `ReplacementCatalog`, `MysteryModel` (per-cell replacement pipeline), `FloatingModel`, `NonLineRelevance`, `LineEvaluator`, `ScatterEvaluator`, `ClassCountEvaluator`, `WaysEvaluator`, `SpecialSymbolEvaluator`, `AnalyticBaseGame` |
 | `Analysis/Coverage/*.cs` | Construct scanner and folder coverage runner |
+| `Analysis/Feature/*.cs` | Feature Markov chain (`FeatureChain`) and next-state tracking (`StateTracker`) |
 | `Util/GameFiles.cs` | Loading `.dat` / compiling `.agm` |

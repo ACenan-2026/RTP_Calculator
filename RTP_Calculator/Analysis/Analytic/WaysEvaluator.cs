@@ -215,10 +215,10 @@ public sealed class WaysEvaluator
             for (int x = 0; x < n; x++)
             {
                 var reel = model.Reels[columns[x].reel];
-                for (uint p = 0; p < reel.Range; p++)
+                foreach (var (p, count) in reel.Stops)
                 {
                     var (sp, qp) = ColumnAtStop(x, b, p, mystery, outcome);
-                    s[x] += sp; q[x] += qp;
+                    s[x] += count * sp; q[x] += count * qp;
                 }
                 s[x] /= reel.Range; q[x] /= reel.Range;
             }

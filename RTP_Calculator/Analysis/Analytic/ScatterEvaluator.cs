@@ -47,10 +47,10 @@ public sealed class ScatterEvaluator
         Masks = model.Reels.Select(reel =>
         {
             var d = new SortedDictionary<int, (long count, uint rep)>();
-            for (uint p = 0; p < reel.Range; p++)
+            foreach (var (p, count) in reel.Stops)
             {
                 int mask = MaskOf(reel.Windows[p]);
-                d[mask] = d.TryGetValue(mask, out var c) ? (c.count + 1, c.rep) : (1, p);
+                d[mask] = d.TryGetValue(mask, out var c) ? (c.count + count, c.rep) : (count, p);
             }
             return d;
         }).ToList();
@@ -124,7 +124,7 @@ public sealed class ScatterEvaluator
                 attributed += win.WonCredits;
             }
             v[0] = credited - attributed;
-            v[1] = (h.FeatureEntrySuppressed ? h.FeatureEntryTriggered() : res.LeftBase) ? 1 : 0;
+            v[1] = h.EntryTriggered(res) ? 1 : 0;
             return v;
         });
         m.Other = e[0]; m.Trigger = e[1];

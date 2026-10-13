@@ -53,6 +53,9 @@ public sealed class NonLineRelevance
             if (layout.PayConditions.Contains(key)) { queue.Enqueue(key); return; }
             // Metamorphic token triggers fire on token totals collected over many spins, not on one spin.
             if (game.MetaTokens.ContainsKey(key) || game.MetaWinTables.Any(x => x.Value.Contains(key))) return;
+            // Keyed by another strategy's name: the follow-on transition when that strategy finishes (e.g. back to
+            // base when the free spins run out), not something the symbols decide.
+            if (game.Strategies.Any(x => x.Value.Name.CString == key)) return;
             var t = game.Triggers.Contains(key) ? game.Triggers[key] : game.KeyWordTriggers.Contains(key) ? game.KeyWordTriggers[key] : null;
             if (t is null || t.DependentNames.Length == 0)
             {
@@ -65,6 +68,10 @@ public sealed class NonLineRelevance
             foreach (var d in t.DependentNames) ResolveKey(d);
         }
         foreach (var k in entryKeys) ResolveKey(k);
+        // Conditions that change the game state through a reel's symbol set (e.g. a feature's wild counter or
+        // ring count held on a hidden reel) matter for what comes next, even when they pay nothing.
+        foreach (var change in layout.WinBasedReelSymbolSetChanges.Concat(layout.ReelSymbolSetChanges))
+            if (!change.TriggerName.IsEmpty) ResolveKey(change.TriggerName.CString);
         foreach (var p in layout.PayConditions)
         {
             var pc = p.Value;
@@ -171,7 +178,19 @@ public sealed class NonLineRelevance
             var s = window[w];
             if (FullCells.Contains((reel, w))) parts[w] = s.Name.CString;
             else if (CellSymbols.TryGetValue((reel, w), out var set))
-                parts[w] = set.Contains(s.Name.CString) || (!s.AliasName.IsEmpty && set.Contains(s.AliasName.CString)) ? s.Name.CString : ".";
+            {
+                // Symbols are equivalent here when they match the same relevant names: a symbol listed by name keeps
+                // its name; one that only matches through an alias (e.g. every 'NoCash' symbol) is keyed by that alias.
+                if (set.Contains(s.Name.CString)) parts[w] = s.Name.CString;
+                else
+                {
+                    var aliases = new List<string>();
+                    if (!s.AliasName.IsEmpty && set.Contains(s.AliasName.CString)) aliases.Add(s.AliasName.CString);
+                    foreach (var a in s.AliasNameList) if (set.Contains(a.CString) && !aliases.Contains(a.CString)) aliases.Add(a.CString);
+                    aliases.Sort(StringComparer.Ordinal);
+                    parts[w] = aliases.Count == 0 ? "." : "~" + string.Join("+", aliases);
+                }
+            }
             else parts[w] = "";
         }
         return string.Join("|", parts);

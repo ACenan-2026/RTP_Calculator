@@ -90,11 +90,11 @@ public sealed class MysteryModel
             var info = model.Reels[reel];
             var windows = m.rules.Where(r => r.Kind == "coordinate" && r.Source.reel == reel).Select(r => r.Source.window).Distinct().ToArray();
             var groups = new Dictionary<string, (long count, AGTSymbol[] symbols)>(StringComparer.Ordinal);
-            for (uint p = 0; p < info.Range; p++)
+            foreach (var (p, count) in info.Stops)
             {
                 var syms = windows.Select(w => info.WindowSymbols[p][w]).ToArray();
                 string key = string.Join("|", syms.Select(s => s.Name.CString));
-                groups[key] = groups.TryGetValue(key, out var g) ? (g.count + 1, g.symbols) : (1, syms);
+                groups[key] = groups.TryGetValue(key, out var g) ? (g.count + count, g.symbols) : (count, syms);
             }
             var next = new List<(double, Dictionary<(int, int), AGTSymbol>)>();
             foreach (var (p, s) in outcomes)
